@@ -302,7 +302,7 @@ set_file_mtime()
     file="$1"
     timestamp="$2"
 
-    is_timestamp "$timestamp" || return 1
+    ! is_timestamp "$timestamp" && echo "invalid timestamp: $timestamp" && return 1
 
     case "$PLATFORM" in
 
@@ -347,17 +347,68 @@ get_timestamp()
 
 select_arg()
 {
+    key=$1
+    shift
+    _select_from_args 1 "$key" "$@"
+}
+
+select_args()
+{
+    key=$1
+    shift
+    _select_from_args 0 "$key" "$@"
+}
+
+_select_from_args()
+{
+    one_only=$1
+    key=$2
+    opt_key=
+
+    shift
+    shift
+
     for p in "$@";
     do
-        [ "$p" = "$1" ] && return 0
+        case "$p" in
+            "$key"=*)
+                echo "${p#*"$key"=}"
+                return 0
+            ;;
+            "$key")
+                opt_key=$p && continue
+            ;;
+            *)
+                if [ -n "$opt_key" ]; then
+                    echo "$p"
+                    [ "$one_only" = 1 ] && return 0
+                fi
+            ;;
+        esac
     done
+
+    [ -n "$opt_key" ] && return 0
+
     return 1
 }
 
 select_arg_dirs()
 {
+    select_arg_dirs_from "" "$@"
+}
+
+select_arg_dirs_from()
+{
+    start_item=$1
+    shift
+
     for p in "$@";
     do
+        if [ -n "$start_item" ]; then
+            [ "$p" = "$start_item" ] && start_item=
+            continue
+        fi
+
         case "$p" in
             -*)
                 opt_key=$p
@@ -1353,9 +1404,11 @@ note_get_mtime()
 {
     wanted=$1
     commit=$2
+    [ -z "$commit" ] && commit=$(last_commit_for_file "$wanted")
+
     note_show "$commit" | while IFS="$SEP" read -r path ts rest; do
         [ -n "$rest" ] && continue
-        [ "$path" = "$wanted" ] || continue
+        [ "$path" = "$SUB_DIR$wanted" ] || continue
         is_timestamp "$ts" || continue
         printf '%s\n' "$ts"
         break
@@ -1423,12 +1476,14 @@ update_commit_note()
 # Synchronization
 # ---------------------------------------------------------------------------
 
+#$1 path to root
+#$2  timestamp to set
 synchronize_file()
 {
-    rel=$1
+    p2r=$1
     ts=$2
 
-    path="$REPO_ROOT/$rel"
+    path="$REPO_ROOT/$p2r"
 
     ! [ -e "$path" ] && return 0
 
@@ -1436,12 +1491,12 @@ synchronize_file()
 
     [ "$file_ts" = "$ts" ] && return 0
 
-    ! set_file_mtime "$path" "$ts" && {
-        echo "failed to synchronize mtime '$rel'"
+    ! set_file_mtime "$path" "$ts" &&
+        echo "failed to synchronize mtime '$p2r'" &&
         return 1
-    }
 
-    echo "Synchronized mtime $(format_timestamp "$ts") '$rel'"
+    echo "Synchronized mtime $(format_timestamp "$ts") '$p2r'"
+
     return 0
 }
 
@@ -1523,7 +1578,7 @@ synchronize_range()
     echo "$commits" | while read -r line
     do
         cmt="${line#*commit }"
-        echo "synchronize $cmt ..."
+#        echo "synchronize $cmt ..."
         ! synchronize_commit "$cmt" && echo "synchronize $cmt failed." && return 1
 #        echo "synchronize $cmt ok."
     done
@@ -1543,14 +1598,12 @@ git_command_handler()
 
     [ -z "$cmd" ] && return 1
 
-    need_sync=
     case "$cmd" in
-        commit|push)
+        commit|push|restore)
+            need_sync=
             ;;
         reset)
-            if select_arg "--hard"; then
-                need_sync=1
-            fi
+            select_arg "--hard" "$@" && need_sync=1 || need_sync=
             ;;
         *)
             need_sync=1
@@ -1572,6 +1625,59 @@ git_command_handler()
 
             echo "KMT: notes added."
         ;;
+        restore)
+            if select_arg "--staged" "$@"; then
+                echo "staged pass"
+                return 0
+            fi
+
+            if source=$(select_arg "--source" "$@"); then
+                echo "source: $source"
+                files=$(select_arg_dirs_from "--source=$source" "$@")
+            else
+                source=
+                files=$(select_arg_dirs_from "restore" "$@")
+            fi
+
+            log "$source, $files"
+
+            [ -n "$files" ] && while IFS= read -r path;
+            do
+
+                note_ts=$(note_get_mtime "$path" "$source")
+
+                [ -z "$note_ts" ] && continue
+
+                synchronize_file "$SUB_DIR$path" "$note_ts"
+            done << EOF
+$files
+EOF
+            ;;
+        checkout)
+            branch=$(select_arg "checkout" "$@")
+            [ -z "$branch" ] && echo "unknown branch" && return 1
+
+            if select_arg "--" "$@" > /dev/null; then
+                files=$(select_args "--" "$@")
+            else
+                files=$(select_args "$branch" "$@")
+            fi
+
+            if [ -n "$files" ]; then
+                while IFS= read -r path;
+                do
+                    [ -e "$path" ] || continue
+
+                    note_ts=$(note_get_mtime "$path" "$branch")
+                    echo "$branch: $files, $note_ts"
+                    synchronize_file "$SUB_DIR$path" "$note_ts"
+                done << EOF
+$files
+EOF
+
+                return 0
+            fi
+        ;;
         push)
             log "post push ..."
 
@@ -1588,7 +1694,7 @@ git_command_handler()
         ;;
     esac
 
-    if [ -n "$need_sync" ]; then
+    if [ "$need_sync" = "1" ]; then
         [ "$cmd" = "reset" ] && OLD=HEAD
         ! synchronize_range "$OLD" HEAD && return 1
     fi
@@ -1654,7 +1760,7 @@ show_history()
 #    echo "===== mtime history: $path ====="
     origin_git log --format='%H%x09%cI' --follow -- "$path" |
     while IFS="$TAB" read -r commit date; do
-        note_ts=$(note_get_mtime "$SUB_DIR$path" "$commit")
+        note_ts=$(note_get_mtime "$path" "$commit")
         if [ -n "$note_ts" ]; then
             printf '%s | %s | %s | %s\n' "$commit" "$date" "$note_ts" "$(format_timestamp "$note_ts")"
         else
@@ -1721,6 +1827,21 @@ select_git_command()
     return 0
 }
 
+select_checkout_files()
+{
+    opt_key=
+    for p in "$@"
+    do
+        [ "--" = "$p" ] && opt_key="paths" && continue
+
+        [ -n "$opt_key" ] && echo "$p"
+    done
+
+    [ -z "$opt_key" ] && return 1
+
+    return 0
+}
+
 app_command_handler()
 {
     cmd=$(select_git_command "$@")
@@ -1735,7 +1856,7 @@ app_command_handler()
                 origin_git "$@"
             fi
             ;;
-        commit|revert|checkout|reset|pull|push)
+        commit|restore|revert|reset|checkout|pull|push)
             init_path
             git_command_handler "$@"
             ;;
@@ -1822,7 +1943,7 @@ app_kmt_list()
 
         [ -z "$commit" ] && return 1
 
-        note_ts="$(note_get_mtime "$SUB_DIR$path" "$commit")"
+        note_ts="$(note_get_mtime "$path" "$commit")"
 
 #        echo "$SUB_DIR$path, $commit, $note_ts" && return 1
 
@@ -1857,7 +1978,7 @@ app_save_file_mtime()
     ! commit=$(last_commit_for_file "$file") || [ -z "$commit" ] && echo "$commit" && echo "get commit failed $file" && return 1
 
     if show_note "$commit" > /dev/null; then
-        note_ts=$(note_get_mtime "$SUB_DIR$file" "$commit")
+        note_ts=$(note_get_mtime "$file" "$commit")
         if [ "$file_ts" = "$note_ts" ]; then
             log "mtime exists in note, $file, $file_ts"
             return 0
