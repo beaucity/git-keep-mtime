@@ -1517,7 +1517,7 @@ synchronize_range()
     if [ "$from_commit" = "$to_commit" ]; then
         commits="commit $to_commit"
     else
-        commits=$(git log --reverse "$from_commit"..."$to_commit" | grep '^commit')
+        commits=$(git log --reverse "$from_commit".."$to_commit" | grep '^commit')
     fi
 
     echo "$commits" | while read -r line
