@@ -1469,7 +1469,7 @@ synchronize_commit()
 $note
 EOF2
 
-    echo "Synchronized $count files; failed: $failed."
+#    echo "Synchronized $count files; failed: $failed."
     [ "$failed" -eq 0 ]
 }
 
@@ -1523,7 +1523,7 @@ synchronize_range()
     echo "$commits" | while read -r line
     do
         cmt="${line#*commit }"
-#        echo "synchronize $cmt ..."
+        echo "synchronize $cmt ..."
         ! synchronize_commit "$cmt" && echo "synchronize $cmt failed." && return 1
 #        echo "synchronize $cmt ok."
     done
