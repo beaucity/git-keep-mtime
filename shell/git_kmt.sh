@@ -1512,6 +1512,8 @@ synchronize_range()
     from_commit=$1
     to_commit=$2
 
+    echo "synchronize_range $from_commit to $to_commit"
+
     if [ "$from_commit" = "$to_commit" ]; then
         commits="commit $to_commit"
     else
@@ -1521,9 +1523,9 @@ synchronize_range()
     echo "$commits" | while read -r line
     do
         cmt="${line#*commit }"
-        echo "synchronize $cmt ..."
+#        echo "synchronize $cmt ..."
         ! synchronize_commit "$cmt" && echo "synchronize $cmt failed." && return 1
-        echo "synchronize $cmt ok."
+#        echo "synchronize $cmt ok."
     done
 
     return 0
@@ -1735,7 +1737,7 @@ app_command_handler()
             ;;
         commit|revert|checkout|reset|pull|push)
             init_path
-            ! git_command_handler "$@" && return $?
+            git_command_handler "$@"
             ;;
         show-note)
             shift
