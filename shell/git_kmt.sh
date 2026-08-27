@@ -1856,7 +1856,7 @@ app_command_handler()
                 origin_git "$@"
             fi
             ;;
-        commit|restore|revert|reset|checkout|pull|push)
+        commit|restore|revert|reset|switch|checkout|pull|push)
             init_path
             git_command_handler "$@"
             ;;
