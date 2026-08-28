@@ -1740,7 +1740,7 @@ post_switch()
     if [ -f "$full_note" ]; then
         fs_note=$(get_note_file "$(current_head)" "fs")
 
-        ! build_fs_note | sort > "$fs_note" && return 1
+        ! build_fs_note | sort > "$fs_note"
 
         ! join -t "$SEP" -a1 -e '' -o 1.1,1.2,2.2 "$fs_note" "$full_note" |
 
@@ -1760,6 +1760,8 @@ post_switch()
 
             echo "synchronize: $(format_timestamp "$ts") $file, $ts"
         done
+
+        rm -f "$fs_note"
     else
         ! synchronize_range "$OLD" "HEAD" && return 1
     fi
