@@ -1742,7 +1742,7 @@ post_switch()
 
         ! build_fs_note | sort > "$fs_note"
 
-        ! join -t "$SEP" -a1 -e '' -o 1.1,1.2,2.2 "$fs_note" "$full_note" |
+        ! join -t "$SEP" -e '' -o 1.1,1.2,2.2 "$fs_note" "$full_note" |
 
         awk -F"$SEP" -v OFS="$SEP" '
         {
@@ -1758,7 +1758,7 @@ post_switch()
 
             set_file_mtime "$REPO_ROOT/$file" "$ts"
 
-#            echo "synchronize: $(format_timestamp "$ts") $file, $ts"
+            log "synchronize: $(format_timestamp "$ts") $file, $ts"
         done
 
         rm -f "$fs_note"
