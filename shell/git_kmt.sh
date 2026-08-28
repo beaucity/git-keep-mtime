@@ -1711,7 +1711,8 @@ post_commit()
     cur_full_note=$(get_note_file "$cur_commit" "full")
     if [ -f "$pre_full_note" ] && [ -f "$stage_note_file" ]; then
         ! merge_full_note "$pre_full_note" "$stage_note_file" "$cur_commit" > "$cur_full_note" && echo "merge full note failed" && return 1
-#        rm -f pre_full_note
+        rm -f "$pre_full_note"
+
         ! update_commit_note "$cur_commit" "$commit_note_file" && return 1
     else
 
