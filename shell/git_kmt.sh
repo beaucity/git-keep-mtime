@@ -1482,6 +1482,13 @@ $after"
     return 0
 }
 
+build_fs_note()
+{
+    origin_git ls-tree -r --full-tree --name-only HEAD -z | xargs -0 -P 100 $stat_cmd
+
+    return 0
+}
+
 build_full_note()
 {
     log "..."
@@ -1731,15 +1738,28 @@ post_switch()
     OLD=$1
     full_note=$(get_note_file "$(current_head)" "full")
     if [ -f "$full_note" ]; then
-        while IFS="$SEP" read -r file ts cmt
+        fs_note=$(get_note_file "$(current_head)" "fs")
+
+        ! build_fs_note | sort > "$fs_note" && return 1
+
+        ! join -t "$SEP" -a1 -e '' -o 1.1,1.2,2.2 "$fs_note" "$full_note" |
+
+        awk -F"$SEP" -v OFS="$SEP" '
+        {
+            if ($2 != $3) {
+                print $1,$3
+            }
+        }
+        ' |
+
+        while IFS="$SEP" read -r file ts
         do
             ! [ -e "$REPO_ROOT/$file" ] && continue
 
             set_file_mtime "$REPO_ROOT/$file" "$ts"
 
             echo "synchronize: $(format_timestamp "$ts") $file, $ts"
-
-        done < "$full_note"
+        done
     else
         ! synchronize_range "$OLD" "HEAD" && return 1
     fi
@@ -1908,7 +1928,7 @@ EOF
                     [ -z "$note_ts" ] && continue
 
                     log "$branch: $files, $note_ts"
-                    synchronize_file "$OLD" "$SUB_DIR$path" "$note_ts"
+                    synchronize_file "$SUB_DIR$path" "$note_ts"
                 done << EOF
 $files
 EOF
@@ -1916,7 +1936,7 @@ EOF
                 return 0
             else
                 if [ "$(current_branch)" != "$pre_branch" ]; then
-                  ! post_switch && return 1
+                  ! post_switch "$OLD" && return 1
                 fi
                 return 0
             fi
@@ -2099,6 +2119,11 @@ app_command_handler()
         add|commit|merge|restore|revert|reset|rebase|switch|checkout|pull|push)
             init_path
             git_command_handler "$@"
+            ;;
+        fs-note)
+            shift
+            init_path
+            build_fs_note
             ;;
         stage-note)
             shift
