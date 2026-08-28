@@ -1735,9 +1735,9 @@ post_switch()
         do
             ! [ -e "$REPO_ROOT/$file" ] && continue
 
-            set_file_mtime "$REPO_ROOT/$file" "ts"
+            set_file_mtime "$REPO_ROOT/$file" "$ts"
 
-            echo "$file, $ts"
+            echo "synchronize: $file, $ts"
 
         done < "$full_note"
     else
@@ -1892,8 +1892,6 @@ EOF
             branch=$(select_arg "checkout" "$@")
             [ -z "$branch" ] && echo "unknown branch" && return 1
 
-            cur_branch
-
             if select_arg "--" "$@" > /dev/null; then
                 files=$(select_args "--" "$@")
             else
@@ -1918,7 +1916,7 @@ EOF
                 return 0
             else
                 if [ "$(current_branch)" != "$pre_branch" ]; then
-                  ! post_switch && return 1
+                  ! post_switch "$OLD" && return 1
                 fi
                 return 0
             fi
