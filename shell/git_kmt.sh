@@ -1737,7 +1737,7 @@ post_switch()
 
             set_file_mtime "$REPO_ROOT/$file" "$ts"
 
-            echo "synchronize: $file, $ts"
+            echo "synchronize: $(format_timestamp "$ts") $file, $ts"
 
         done < "$full_note"
     else
@@ -1908,7 +1908,7 @@ EOF
                     [ -z "$note_ts" ] && continue
 
                     log "$branch: $files, $note_ts"
-                    synchronize_file "$SUB_DIR$path" "$note_ts"
+                    synchronize_file "$OLD" "$SUB_DIR$path" "$note_ts"
                 done << EOF
 $files
 EOF
@@ -1916,7 +1916,7 @@ EOF
                 return 0
             else
                 if [ "$(current_branch)" != "$pre_branch" ]; then
-                  ! post_switch "$OLD" && return 1
+                  ! post_switch && return 1
                 fi
                 return 0
             fi
