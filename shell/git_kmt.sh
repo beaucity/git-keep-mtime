@@ -14,7 +14,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.1.0-alpha'
+KMT_VERSION='0.1.1-alpha'
 
 META_NAME="mtime-notes"
 
@@ -25,10 +25,11 @@ TAB=$(printf '\t')
 
 CUR_DIR=$(pwd)
 REPO_ROOT=
+GIT_DIR=
 SUB_DIR=
 
 
-
+#!/bin/sh
 ##############################################################################
 # Utility
 ##############################################################################
@@ -154,7 +155,7 @@ detect_time_offset()
 {
     max_offset=60
 
-    dirs=$(select_arg_dirs "$@")
+    dirs=$(select_dirs "$@")
     url=
     while IFS= read -r dir
     do
@@ -392,16 +393,8 @@ _select_from_args()
     return 1
 }
 
-select_arg_dirs()
+select_dirs()
 {
-    select_arg_dirs_from "" "$@"
-}
-
-select_arg_dirs_from()
-{
-    start_item=$1
-    shift
-
     for p in "$@";
     do
         if [ -n "$start_item" ]; then
@@ -820,7 +813,7 @@ kmt_command_handler()
 
     [ -z "$SCAN_BACKEND" ] && ! auto_set_kmt_scan_backend && return 1
 
-    dirs=$(select_arg_dirs "$@")
+    dirs=$(select_dirs "$@")
     while IFS= read -r dir
     do
         ! app_is_working_copy "$dir" && return 1
@@ -944,7 +937,7 @@ kmt_foreach_file()
 
     case $cmd in
         scan)
-            dirs=$(select_arg_dirs "$@")
+            dirs=$(select_dirs "$@")
             dirs_inline=$(echo "$dirs" | tr '\n' ' ' | sed 's/[ \t]*$//')
 
             echo "Scanning versioned files in directories $dirs_inline..."
@@ -980,7 +973,7 @@ kmt_foreach_file()
 
     esac
 
-    dirs=$(select_arg_dirs "$@")
+    dirs=$(select_dirs "$@")
 
     while IFS= read -r dir
     do
@@ -1055,14 +1048,17 @@ EOF
         if [ "$effected_count" = 0 ]; then
             echo "No files completed"
         else
-            ! app_on_kmt_completed && return 1
+            ! app_on_kmt_completed "$effected_count" && return 1
+
+            echo "Completed $effected_count files successfully."
+            completed_count=$(( completed_count+effected_count ))
         fi
         ;;
     'synchronize')
         if [ "$effected_count" = 0 ]; then
             echo "No files synchronized"
         else
-            echo "Synchronized ${effected_count} files successfully."
+            echo "Synchronized $effected_count files successfully."
             completed_count=$(( completed_count+effected_count ))
         fi
         ;;
@@ -1070,7 +1066,10 @@ EOF
         if [ "$effected_count" = 0 ]; then
             echo "No files resolved"
         else
-            ! app_on_kmt_resolved && return 1
+            ! app_on_kmt_resolved "$effected_count" && return 1
+
+            echo "Resolved $effected_count files successfully."
+            completed_count=$(( completed_count+effected_count ))
         fi
         ;;
     'show_completed')
@@ -1106,7 +1105,7 @@ Unable to synchronize files:
 
 kmt_ui()
 {
-    dirs=$(select_arg_dirs "$@")
+    dirs=$(select_dirs "$@")
 
     dirs_inline=$(echo "$dirs" | tr '\n' ' ' | sed 's/[ \t]*$//')
 
@@ -1319,13 +1318,17 @@ KMT commands:
   kmt-fetch-notes [remote]   fetch refs/notes/timestamps
 
 Intercepted Git commands:
+  add
   commit
-  checkout, co
-  switch
-  restore
-  pull
   merge
+  restore
+  revert
+  reset
   rebase
+  switch
+  checkout
+  pull
+  push
 
 Notes contain only:
   file${SEP}mtime
@@ -1386,33 +1389,35 @@ note_remove()
 # Path and mtime note processing
 # ---------------------------------------------------------------------------
 
-# Git paths are relative to repository root.  Timestamp notes use ASCII ETX
-# (\x03) as the field separator.  It is deliberately not a printable
-# character so normal file names remain easy to inspect.
-
-repo_relative_path()
-{
-    root=$1
-    path=$2
-    case "$path" in
-        /*) case "$path" in "$root"/*) printf '%s\n' "${path#"$root"/}" ;; *) return 1 ;; esac ;;
-        *) printf '%s\n' "$path" ;;
-    esac
-}
-
 note_get_mtime()
 {
     wanted=$1
     commit=$2
-    [ -z "$commit" ] && commit=$(last_commit_for_file "$wanted")
 
-    note_show "$commit" | while IFS="$SEP" read -r path ts rest; do
-        [ -n "$rest" ] && continue
-        [ "$path" = "$SUB_DIR$wanted" ] || continue
-        is_timestamp "$ts" || continue
-        printf '%s\n' "$ts"
-        break
-    done
+    [ -z "$commit" ] && commit=$(last_commit_for_file "$wanted" "$commit")
+
+    ! line=$(note_show "$commit" | grep -m 1 -F "$wanted$SEP") && return 1
+
+    echo "$line" | cut -d "$SEP" -f 2
+
+    return 0
+}
+
+stage_get_mtime()
+{
+    wanted=$1
+
+    head_commit=$(current_head)
+
+    stage_file=$(get_note_file "$head_commit" "stage")
+
+    [ ! -f "$stage_file" ] && return 1
+
+    ! line=$(grep -m 1 -F "$wanted$SEP" "$stage_file") && return 1
+
+    echo "$line" | cut -d "$SEP" -f 2
+
+    return 0
 }
 
 valid_note_line()
@@ -1423,18 +1428,115 @@ valid_note_line()
     is_timestamp "$ts"
 }
 
+
+#param #1 is the git status before an add operation, use it to check if an staged file was re-add or not, when re-add,
+#refresh the mtime by stat
+
+build_stage_note()
+{
+    before=$1
+    after=$(origin_git status --short | grep '^[AM]. ')
+
+    head_commit=$(current_head)
+
+    stage_file=$(get_note_file "$head_commit" "stage")
+
+    new_stage_file="$stage_file.$$"
+
+    [ -f "$new_stage_file" ] && rm -f "$new_stage_file"
+
+    [ -f "$stage_file" ] && staged_table=$(cat "$stage_file") || staged_table=
+
+    log "before:
+$before"
+    log "after:
+$after"
+
+    echo "$after" | while IFS= read -r line
+    do
+        w_flag=$(echo "$line"| cut -c 2-2)
+        file=$(echo "$line"| cut -c 4-)
+#        log "wf: $w_flag, file: $file"
+        if [ "$w_flag" = ' ' ] &&
+           ( echo "$before" | grep -m 1 -F "M $file" | cut -c 4- | grep -m 1 -Fxq "$file" || \
+             echo "$before" | grep -m 1 -F "? $file" | cut -c 4- | grep -m 1 -Fxq "$file" ); then
+            log "re-add: $file"
+            echo "$file"
+        elif line=$(echo "$staged_table" | grep -m 1 -F "$file$SEP"); then
+            log "keep: $file"
+            echo "$line" >> "$new_stage_file"
+        else
+            log "add: $file"
+            echo "$file"
+        fi
+    done |
+    while IFS= read -r line
+    do
+        printf "%s\0" "$line";
+    done | xargs -0 -L 100 $stat_cmd | sort >> "$new_stage_file"
+
+    ! mv -f "$new_stage_file" "$stage_file" && return 1
+
+#    cat "$stage_file"
+
+    return 0
+}
+
+build_full_note()
+{
+    log "..."
+
+    commit=$1
+
+    log "build full note ... $commit"
+
+    [ -z "$commit" ] && echo "no commit hash" && return 1
+
+    origin_git ls-tree -r --full-tree --name-only "$commit" | while IFS= read -r file
+    do
+        log "file: $file"
+        ! last_commit=$(last_commit_for_file "$file" "$commit") && echo "get last commit failed" && return 1
+        [ -z "$last_commit" ] &&
+            log "no commit" &&
+#                printf "%s\0" "$file" &&
+            continue
+
+        ! note_ts=$(note_get_mtime "$file" "$last_commit") &&
+            log "no ts in commit: $file $last_commit" &&
+#                printf "%s\0" "$file" &&
+            continue
+
+        echo "$file$SEP$note_ts$SEP$last_commit"
+    done | sort
+
+    return 0
+}
+
+show_full_note()
+{
+    commit=$1
+    [ -z "$commit" ] && commit=$(current_head)
+
+    note_file=$(get_note_file "$commit" "full")
+    if [ ! -f "$note_file" ]; then
+        ! build_full_note "$commit" > "$note_file" && cat "$note_file" && rm -f "$note_file" && echo "build full note failed!" && return 1
+    fi
+
+    cat "$note_file"
+}
+
 # Build notes for an already-created commit.  diff-tree is used because it
 # describes the commit itself instead of the current index/working tree.
 # This is intentionally a post-commit operation.
 
-build_note()
+build_commit_note()
 {
     commit=${1:-HEAD}
 
     log "build_note start, $REPO_ROOT, $(pwd)"
 
     ( cd "$REPO_ROOT" &&
-        ! origin_git diff-tree --diff-filter=ACMRT --no-commit-id --name-only -r -M "$commit" -z | xargs -0 stat -f "%N$SEP%m" &&
+        ! origin_git diff-tree --diff-filter=ACMRT --no-commit-id --name-only -r -M "$commit" -z | xargs -0 -L 100 $stat_cmd &&
             echo "stat failed, $REPO_ROOT, $(pwd)" &&
             return 1
     )
@@ -1446,28 +1548,54 @@ build_note()
 update_commit_note()
 {
     commit=${1:-HEAD}
+    note_file=$2
 
-    ! note=$(build_note "$commit") &&
-        echo "$note" &&
-        echo "build note failed" &&
-        return 1
+    if [ -z "$note_file" ]; then
+        pre_commit=$(origin_git rev-parse "$commit~1")
+        stage_file=$(get_note_file "$pre_commit" "stage")
+        [ -f "$stage_file" ] && note_file="$stage_file"
+    fi
 
-    [ -z "$note" ] && echo "build result is empty $commit" && return 1
+    if [ -z "$note_file" ]; then
+        ! note=$(build_commit_note "$commit") &&
+            echo "$note" &&
+            echo "build note failed" &&
+            return 1
 
-    ! temp=$(mktemp "${TMPDIR:-/tmp}/git-kmt-diff.XXXXXX") &&
-        echo "mktemp failed" &&
-        return 1
+        [ -z "$note" ] && echo "build result is empty $commit" && return 1
 
-    echo "$note" > "$temp"
-#    echo "$temp"
-#    cat "$temp"
-    if ! note_add_file "$commit" "$temp"; then
-        echo "add note failed: $commit, $temp"
-        rm -f "$temp"
+        ! note_file=$(mktemp "${TMPDIR:-/tmp}/git-kmt-diff.XXXXXX") &&
+            echo "mktemp failed" &&
+            return 1
+
+        echo "$note" > "$note_file"
+    else
+        ! [ -f "$note_file" ] && echo "commit timestamp file not exists $note_file" && return 1
+    fi
+
+    if ! note_add_file "$commit" "$note_file"; then
+        echo "add note failed: $commit, $note_file"
+        rm -f "$note_file"
         return 1
     fi
 
-    rm -f "$temp"
+    rm -f "$note_file"
+
+    return 0
+}
+
+merge_full_note()
+{
+    main=$1
+    delta=$2
+    commit=$3
+
+    ! join -t "$SEP" -a1 -a2 -e '' -o 0,1.2,1.3,2.2 "$main" "$delta" |
+      awk -F"$SEP" -v OFS="$SEP" -v c="$commit" '
+      {
+          print $1,$4?$4:$2,$4?c:$3
+      }
+      ' && return 1
 
     return 0
 }
@@ -1524,7 +1652,7 @@ synchronize_commit()
 $note
 EOF2
 
-#    echo "Synchronized $count files; failed: $failed."
+    log "Synchronized $count files; failed: $failed."
     [ "$failed" -eq 0 ]
 }
 
@@ -1538,9 +1666,85 @@ synchronize_head()
 # Commit / post-commit
 # ---------------------------------------------------------------------------
 
+get_note_file()
+{
+    commit=$1
+    cate=$2
+
+    if [ ! -e "$GIT_DIR/kmt/" ]; then
+        ! mkdir -p "$GIT_DIR/kmt/" && echo "mk kmt dir failed" && return 1
+    fi
+
+    echo "$GIT_DIR/kmt/$commit.$cate.note"
+
+    return 0
+}
+
+post_add()
+{
+    ! build_stage_note "$before" > /dev/null && return 1
+
+    return 0
+}
+
 post_commit()
 {
-    ! update_commit_note && return 1 || return 0
+    pre_commit=$1
+    cur_commit=$(current_head)
+
+    stage_note_file="$(get_note_file "$pre_commit" "stage")"
+
+    if [ -f "$stage_note_file" ]; then
+        commit_note_file="$stage_note_file"
+    else
+        commit_note_file=
+    fi
+
+    pre_full_note=$(get_note_file "$pre_commit" "full")
+    cur_full_note=$(get_note_file "$cur_commit" "full")
+    if [ -f "$pre_full_note" ] && [ -f "$stage_note_file" ]; then
+        ! merge_full_note "$pre_full_note" "$stage_note_file" "$cur_commit" > "$cur_full_note" && echo "merge full note failed" && return 1
+#        rm -f pre_full_note
+        ! update_commit_note "$cur_commit" "$commit_note_file" && return 1
+    else
+
+        #update note to commit first, the it is useful when build full note, or will missing
+        ! update_commit_note "$cur_commit" "$commit_note_file" && return 1
+
+        log "build full note for $cur_commit ..."
+
+        if ! build_full_note "$cur_commit" > "$cur_full_note"; then
+            echo "build full note for $cur_commit failed"
+            return 1
+        fi
+
+        cat "$cur_full_note"
+
+        log "build full note for $cur_commit ok"
+    fi
+
+    return 0
+}
+
+post_switch()
+{
+    OLD=$1
+    full_note=$(get_note_file "$(current_head)" "full")
+    if [ -f "$full_note" ]; then
+        while IFS="$SEP" read -r file ts cmt
+        do
+            ! [ -e "$REPO_ROOT/$file" ] && continue
+
+            set_file_mtime "$REPO_ROOT/$file" "ts"
+
+            echo "$file, $ts"
+
+        done < "$full_note"
+    else
+        ! synchronize_range "$OLD" "HEAD" && return 1
+    fi
+
+    return 0
 }
 
 post_push ()
@@ -1562,6 +1766,11 @@ current_head()
     origin_git rev-parse --verify HEAD
 }
 
+current_branch()
+{
+    origin_git branch --show-current
+}
+
 synchronize_range()
 {
     from_commit=$1
@@ -1578,9 +1787,9 @@ synchronize_range()
     echo "$commits" | while read -r line
     do
         cmt="${line#*commit }"
-#        echo "synchronize $cmt ..."
+        log "synchronize $cmt ..."
         ! synchronize_commit "$cmt" && echo "synchronize $cmt failed." && return 1
-#        echo "synchronize $cmt ok."
+        log "synchronize $cmt ok."
     done
 
     return 0
@@ -1598,15 +1807,22 @@ git_command_handler()
 
     [ -z "$cmd" ] && return 1
 
+    need_sync=
     case "$cmd" in
-        commit|push|restore)
-            need_sync=
+        checkout|switch)
+            pre_branch=$(current_branch)
+            ;;
+        pull)
+            need_sync=1
+            ;;
+        add)
+            pre_add_status=$(origin_git status --short | grep '^.[?M] ')
+            ;;
+        commit|merge)
+            pre_commit=$(origin_git rev-parse HEAD)
             ;;
         reset)
             select_arg "--hard" "$@" && need_sync=1 || need_sync=
-            ;;
-        *)
-            need_sync=1
             ;;
     esac
 
@@ -1617,34 +1833,52 @@ git_command_handler()
     origin_git "$@" || return $?
 
     case "$cmd" in
-        commit|merge)
+        add)
+            log "post add ..."
+            ! post_add "$pre_add_status" && echo "add succeeded but timestamp note creation failed." && return 1
+            echo "KMT: mtime added."
+            ;;
+        commit)
             log "post commit ..."
+
+#            cd "$REPO_ROOT" &&
+            ! post_commit "$pre_commit" && echo "commit succeeded but timestamp note creation failed." && return 1
+
+            log "KMT: notes added."
+            ;;
+        merge)
+            log "post merge ..."
             # merge creates a new commit in the usual non-ff case.  If it did, create
             # its note; afterwards synchronize the resulting HEAD.
-            ! post_commit && echo "commit succeeded but timestamp note creation failed." && return 1
 
-            echo "KMT: notes added."
-        ;;
+            ! post_commit "$pre_commit" && echo "commit succeeded but timestamp note creation failed." && return 1
+
+            log "KMT: notes added."
+            ;;
         restore)
             if select_arg "--staged" "$@"; then
-                echo "staged pass"
+                # in this case( with --staged), the file just removed from the stash, but not restore the file content.
+                # so do not restore the mtime, just refresh the stage note.
+                ! build_stage_note && return 1
+
                 return 0
             fi
 
             if source=$(select_arg "--source" "$@"); then
                 echo "source: $source"
-                files=$(select_arg_dirs_from "--source=$source" "$@")
+                files=$(select_args "--source=$source" "$@")
             else
                 source=
-                files=$(select_arg_dirs_from "restore" "$@")
+                files=$(select_args "restore" "$@")
             fi
 
             log "$source, $files"
 
             [ -n "$files" ] && while IFS= read -r path;
             do
+                [ -e "$path" ] || continue
 
-                note_ts=$(note_get_mtime "$path" "$source")
+                note_ts=$(note_get_mtime "$SUB_DIR$path" "$source")
 
                 [ -z "$note_ts" ] && continue
 
@@ -1652,10 +1886,13 @@ git_command_handler()
             done << EOF
 $files
 EOF
+
             ;;
         checkout)
             branch=$(select_arg "checkout" "$@")
             [ -z "$branch" ] && echo "unknown branch" && return 1
+
+            cur_branch
 
             if select_arg "--" "$@" > /dev/null; then
                 files=$(select_args "--" "$@")
@@ -1668,30 +1905,44 @@ EOF
                 do
                     [ -e "$path" ] || continue
 
-                    note_ts=$(note_get_mtime "$path" "$branch")
-                    echo "$branch: $files, $note_ts"
+                    note_ts=$(note_get_mtime "$SUB_DIR$path" "$branch")
+
+                    [ -z "$note_ts" ] && continue
+
+                    log "$branch: $files, $note_ts"
                     synchronize_file "$SUB_DIR$path" "$note_ts"
                 done << EOF
 $files
 EOF
 
                 return 0
+            else
+                if [ "$(current_branch)" != "$pre_branch" ]; then
+                  ! post_switch && return 1
+                fi
+                return 0
             fi
-        ;;
+            ;;
+        switch)
+            if [ "$(current_branch)" != "$pre_branch" ]; then
+              ! post_switch "$OLD" && return 1
+            fi
+            return 0
+            ;;
         push)
             log "post push ..."
 
             ! post_push && echo "Git push succeeded but timestamp note push failed." && return 1
 
             echo "KMT: notes pushed."
-        ;;
+            ;;
         pull)
             log "post pull ..."
 
             ! post_pull && echo "Git pull succeeded but timestamp note fetch failed." && return 1
 
             echo "KMT: notes fetched."
-        ;;
+            ;;
     esac
 
     if [ "$need_sync" = "1" ]; then
@@ -1705,31 +1956,19 @@ EOF
 # ---------------------------------------------------------------------------
 # kmt-complete
 # ---------------------------------------------------------------------------
-# Complete means: for files currently present in the current tree which have
-# no note in their corresponding last-commit record, the current filesystem
-# mtime may be recorded only when it is strictly earlier than the commit time.
-#
 
-# Return last commit which changed a path.  This is intentionally per-file;
-# a production implementation can batch this with git log --name-status.
 last_commit_for_file()
 {
     path=$1
-#    root=$(repo_root) || return 1
-#    rel=$(repo_relative_path "$root" "$path") || return 1
-#    (
-#        cd "$root" || exit 1
-#        origin_git log -1 --format='%H' -- "$rel"
-#    )
-
-    origin_git log -1 --format='%H' -- "$path"
+    to_commit=${2:-HEAD}
+    origin_git log -1 "$to_commit" --format='%H' -- "$path"
 }
 
 # ---------------------------------------------------------------------------
 # Maintenance / inspection commands
 # ---------------------------------------------------------------------------
 
-show_note()
+show_commit_note()
 {
     ! commit=$(origin_git rev-parse "${1:-HEAD}") && echo "get commit-id failed $1" && return 1
 
@@ -1760,7 +1999,7 @@ show_history()
 #    echo "===== mtime history: $path ====="
     origin_git log --format='%H%x09%cI' --follow -- "$path" |
     while IFS="$TAB" read -r commit date; do
-        note_ts=$(note_get_mtime "$path" "$commit")
+        note_ts=$(note_get_mtime "$SUB_DIR$path" "$commit")
         if [ -n "$note_ts" ]; then
             printf '%s | %s | %s | %s\n' "$commit" "$date" "$note_ts" "$(format_timestamp "$note_ts")"
         else
@@ -1801,7 +2040,10 @@ init_path()
 {
     CUR_DIR=$(pwd)
     REPO_ROOT=$(repo_root)
+    GIT_DIR=$(repo_git_dir)
     [ "$REPO_ROOT" = "$CUR_DIR" ] && SUB_DIR= || SUB_DIR=${CUR_DIR#*"$REPO_ROOT/"}/
+
+    [ "$PLATFORM" = 'linux' ] && stat_cmd="stat -c %n$SEP%Y" || stat_cmd="stat -f "%N$SEP%m""``
 }
 
 select_git_command()
@@ -1856,19 +2098,25 @@ app_command_handler()
                 origin_git "$@"
             fi
             ;;
-        commit|restore|revert|reset|switch|checkout|pull|push)
+        add|commit|merge|restore|revert|reset|rebase|switch|checkout|pull|push)
             init_path
             git_command_handler "$@"
             ;;
-        show-note)
+        stage-note)
             shift
             init_path
-            show_note "$@"
+            build_stage_note
             ;;
-        preview-note)
+        commit-note)
             shift
             init_path
-            build_note "$@"
+            show_commit_note "$@"
+            ;;
+        full-note)
+            shift
+            init_path
+            cd "$REPO_ROOT" &&
+                show_full_note "$@"
             ;;
         update-note)
             shift
@@ -1943,12 +2191,12 @@ app_kmt_list()
 
         [ -z "$commit" ] && return 1
 
-        note_ts="$(note_get_mtime "$path" "$commit")"
+        note_ts="$(note_get_mtime "$SUB_DIR$path" "$commit")"
 
 #        echo "$SUB_DIR$path, $commit, $note_ts" && return 1
 
         if [ -z "$note_ts" ]; then
-            ! version_ts=$(get_commit_date "$commit") || [ -z "$version_ts" ] && echo "Get versioned timestamp failed: '$file'" && return 0
+            ! version_ts=$(get_commit_date "$commit") || [ -z "$version_ts" ] && echo "Get versioned timestamp failed: '$path'" && return 0
         fi
 
         echo "$path$SEP$file_ts$SEP$note_ts$SEP$version_ts"
@@ -1977,8 +2225,8 @@ app_save_file_mtime()
 
     ! commit=$(last_commit_for_file "$file") || [ -z "$commit" ] && echo "$commit" && echo "get commit failed $file" && return 1
 
-    if show_note "$commit" > /dev/null; then
-        note_ts=$(note_get_mtime "$file" "$commit")
+    if show_commit_note "$commit" > /dev/null; then
+        note_ts=$(note_get_mtime "$SUB_DIR$file" "$commit")
         if [ "$file_ts" = "$note_ts" ]; then
             log "mtime exists in note, $file, $file_ts"
             return 0
@@ -2000,9 +2248,9 @@ app_is_later_then_last_2nd_commit()
 
 app_on_kmt_completed()
 {
-    ! origin_git push && echo "push commit failed." && return 1
-
-    ! post_push && echo "push notes failed." && return 1
+#    ! origin_git push && echo "push commit failed." && return 1
+#
+#    ! post_push && echo "push notes failed." && return 1
 
     return 0
 }
