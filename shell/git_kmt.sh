@@ -1758,7 +1758,7 @@ post_switch()
 
             set_file_mtime "$REPO_ROOT/$file" "$ts"
 
-            echo "synchronize: $(format_timestamp "$ts") $file, $ts"
+#            echo "synchronize: $(format_timestamp "$ts") $file, $ts"
         done
 
         rm -f "$fs_note"
