@@ -1746,7 +1746,7 @@ post_switch()
 
         awk -F"$SEP" -v OFS="$SEP" '
         {
-            if ($2 != $3) {
+            if ($2 != $3 && $3 != "") {
                 print $1,$3
             }
         }
