@@ -1363,6 +1363,23 @@ repo_git_dir()
 # Commits helpers
 # ---------------------------------------------------------------------------
 
+commit_parse()
+{
+    origin_git rev-parse --verify "$1"
+}
+
+is_head()
+{
+    commit=${1}
+    [ -z "$commit" ] && return 1
+
+    if [ "$(commit_parse "$commit")" = "$(current_head)" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
 get_commit_time()
 {
     origin_git show -s --format='%ct' "${1:-HEAD}"
@@ -1670,7 +1687,7 @@ gen_full_note_commit_by_commit()
             if [ -s "$full_note_result" ]; then
                 echo "join $full_note_file" >&2
 
-                #join FILE,PRE_NOTE_TS,PRE_COMMIT,CUR_NOTE_TS,CUR_COMMIT
+                #join FILE,PRE_NOTE_TS,PRE_COMMIT,CUR_NOTE_TS,COMMIT_TS
                 if ! str=$(LC_ALL=C join -t "$SEP" -a1 -a2 -o 0,1.2,1.3,2.2,2.3 "$full_note_file" "$full_note_result"); then
                     rm -f "$full_note_result"
                     echo "$str"
@@ -1696,77 +1713,36 @@ gen_full_note_commit_by_commit()
         if ! commit_note=$(note_show "$prev_commit"); then
             ! str=$(get_committed_files "$prev_commit") && echo "diff-tree failed" && return 1
             commit_note=$(echo "$str" | while IFS= read -r file; do
-                    echo "$file$SEP$prev_commit_ts"
+                    echo "$file$SEP$SEP$prev_commit_ts"
                 done | LC_ALL=C sort)
         fi
 
         if [ -s "$full_note_result" ]; then
             echo "join: $prev_commit" >&2
-            #join FILE,PRE_NOTE_TS,CUR_NOTE_TS,CUR_COMMIT
+            #join FILE,PRE_NOTE_TS,CUR_NOTE_TS,COMMIT_TS
             if ! str=$(echo "$commit_note"|LC_ALL=C join -t "$SEP" -a1 -a2 -o 0,1.2,2.2,2.3 - "$full_note_result"); then
                 rm -f "$full_note_result"
                 echo "$str"
                 return 1
             fi
 
-            echo "$str" | awk -F"$SEP" -v OFS="$SEP" -v c="$prev_commit" '{
+            echo "$str" | awk -F"$SEP" -v OFS="$SEP" -v ct="$prev_commit_ts" '{
                 if($4 != ""){
                     print $1,$3,$4
                 }
                 else{
-                    print $1,$2,c
+                    print $1,$2,ct
                 }
             }' >"$full_note_result"
         else
 #            log "output: $prev_commit" >&2
-            echo "$commit_note" | awk -F"$SEP" -v OFS="$SEP" -v c="$prev_commit" '{
-                print $1,$2,c
+            echo "$commit_note" | awk -F"$SEP" -v OFS="$SEP" -v ct="$prev_commit_ts" '{
+                print $1,$2,ct
             }'>"$full_note_result"
         fi
     done
 
     cat "$full_note_result" && rm -f "$full_note_result"
-
-    return 0
-}
-
-update_all_commit_notes()
-{
-    commit=${1:-HEAD}
-    prev_commits=$(origin_git log --pretty=format:"%H" "$commit")
-
-    origin_git log --pretty=format:"%H" "$commit" | while read -r prev_commit
-    do
-#        echo "commit: $prev_commit"
-        ! str=$(note_show "$prev_commit" 2>/dev/null) && continue
-
-        [ -z "$str" ] && continue
-
-        updated=0
-        while IFS="$SEP" read -r file ts
-        do
-            echo "$file" | grep -F "$STX" && updated=1 && break
-
-            if [ -z "$ts" ]; then
-                new=$(echo "$file" | sed "s/,/$SEP/;s/\|/$SEP/")
-                IFS="$SEP" read -r file ts << EOF
-$new
-EOF
-            fi
-            echo "$STX$file$SEP$ts"
-        done > "/tmp/update-note.$$" <<EOF
-$str
-EOF
-
-        [ "$updated" = 1 ] && echo "skip: $prev_commit" && continue
-
-        echo "updated: $prev_commit"
-
-#        cat "/tmp/update-note.$$"
-
-        ! note_add_file "$prev_commit" /tmp/update-note.$$ && return 1
-        rm -f /tmp/update-note.$$
-    done
 
     return 0
 }
@@ -1809,15 +1785,16 @@ gen_full_note_file_by_file()
 
     [ -n "$str" ] && echo "$str" | while IFS="$SEP" read -r file last_commit commit_ts
     do
-        [ -z "$last_commit" ] &&
-            log "no commit $file, $last_commit, $commit_ts" &&
+        if [ -z "$last_commit" ]; then
+            log "no commit $file, $last_commit, $commit_ts"
             continue
+        fi
 
         if ! note_ts=$(note_get_mtime "$file" "$last_commit"); then
             note_ts=""
         fi
 
-        echo "$STX$file$SEP$note_ts$SEP$last_commit"
+        echo "$STX$file$SEP$note_ts$SEP$commit_ts"
 
     done | LC_ALL=C sort
 
@@ -1868,21 +1845,45 @@ refresh_later_full_notes()
     done
 }
 
-commit_parse()
+update_all_commit_notes()
 {
-    origin_git rev-parse --verify "$1"
-}
+    commit=${1:-HEAD}
+    prev_commits=$(origin_git log --pretty=format:"%H" "$commit")
 
-is_head()
-{
-    commit=${1}
-    [ -z "$commit" ] && return 1
+    origin_git log --pretty=format:"%H" "$commit" | while read -r prev_commit
+    do
+#        echo "commit: $prev_commit"
+        ! str=$(note_show "$prev_commit" 2>/dev/null) && continue
 
-    if [ "$(commit_parse "$commit")" = "$(current_head)" ]; then
-        return 0
-    fi
+        [ -z "$str" ] && continue
 
-    return 1
+        updated=0
+        while IFS="$SEP" read -r file ts
+        do
+            echo "$file" | grep -F "$STX" && updated=1 && break
+
+            if [ -z "$ts" ]; then
+                new=$(echo "$file" | sed "s/,/$SEP/;s/\|/$SEP/")
+                IFS="$SEP" read -r file ts << EOF
+$new
+EOF
+            fi
+            echo "$STX$file$SEP$ts"
+        done > "/tmp/update-note.$$" <<EOF
+$str
+EOF
+
+        [ "$updated" = 1 ] && echo "skip: $prev_commit" && continue
+
+        echo "updated: $prev_commit"
+
+#        cat "/tmp/update-note.$$"
+
+        ! note_add_file "$prev_commit" /tmp/update-note.$$ && return 1
+        rm -f /tmp/update-note.$$
+    done
+
+    return 0
 }
 
 complete_head_note()
@@ -1971,10 +1972,12 @@ merge_full_note()
     delta=$2
     commit=$3
 
+    ! commit_ts=$(get_commit_time "$commit") && return 1
+
     ! LC_ALL=C join -t "$SEP" -a1 -a2 -e '' -o 0,1.2,1.3,2.2 "$main" "$delta" |
-      awk -F"$SEP" -v OFS="$SEP" -v c="$commit" '
+      awk -F"$SEP" -v OFS="$SEP" -v ct="$commit_ts" '
       {
-          print $1,$4?$4:$2,$4?c:$3
+          print $1,$4?$4:$2,$4?ct:$3
       }
       ' && return 1
 
