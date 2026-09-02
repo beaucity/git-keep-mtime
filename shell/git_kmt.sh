@@ -1597,7 +1597,7 @@ show_stage_note()
 
 preview_fs_note()
 {
-    origin_git ls-tree -r --full-tree --name-only HEAD -z | batch_stat
+    origin_git ls-tree -r --full-tree --name-only "${1:-HEAD}" -z | batch_stat
 }
 
 get_committed_files()
@@ -2140,7 +2140,7 @@ on_head_moved()
     if [ -f "$full_note" ]; then
         log "restore mtime for each file by full note $full_note"
 
-        ! preview_fs_note |
+        ! preview_fs_note "HEAD" |
             LC_ALL=C sort |
                 LC_ALL=C join -t "$SEP" -e '' -o 1.1,1.2,2.2,2.3 - "$full_note" |
                     awk -F"$SEP" -v OFS="$SEP" '
@@ -2160,7 +2160,7 @@ on_head_moved()
 
                         set_file_mtime "$REPO_ROOT/$file" "$note_ts"
 
-                        echo "synchronize: $(format_timestamp "$note_ts") $file, $note_ts"
+                        log "synchronize: $(format_timestamp "$note_ts") $file, $note_ts"
                     done
     else
         log "restore mtime for each file"
@@ -2176,7 +2176,7 @@ on_head_moved()
             [ -z "$note_ts" ] && note_ts="$commit_ts"
 
             set_file_mtime "$REPO_ROOT/$file" "$note_ts"
-            echo "synchronize: $(format_timestamp "$note_ts") $file, $note_ts"
+            log "synchronize: $(format_timestamp "$note_ts") $file, $note_ts"
         done
 #        ! synchronize_range "$OLD" "HEAD" && return 1
     fi
@@ -2594,7 +2594,7 @@ EOF
                     echo "$str"
                 ;;
             4)
-                str=$(preview_fs_note) &&
+                str=$(preview_fs_note "$commit") &&
                     [ -n "$str" ] && echo "$str" | show_note ||
                     echo "$str"
                 ;;
