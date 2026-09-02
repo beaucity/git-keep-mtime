@@ -1447,7 +1447,7 @@ note_show()
 {
     commit=$1
 
-    origin_git notes --ref="$NOTE_REF" show "$commit"
+    origin_git notes --ref="$NOTE_REF" show "$commit" 2>/dev/null
 }
 
 note_add_file()
@@ -1598,8 +1598,6 @@ show_stage_note()
 preview_fs_note()
 {
     origin_git ls-tree -r --full-tree --name-only HEAD -z | batch_stat
-
-    return 0
 }
 
 get_committed_files()
@@ -1679,12 +1677,12 @@ gen_full_note_commit_by_commit()
                     return 1
                 fi
 
-                echo "$str" | awk -F"$SEP" -v OFS="$SEP" -v stx="$STX" '{
+                echo "$str" | awk -F"$SEP" -v OFS="$SEP" '{
                     if($5 != ""){
-                        print stx$1,$4,$5
+                        print $1,$4,$5
                     }
                     else{
-                        print stx$1,$2,$3
+                        print $1,$2,$3
                     }
                 }' >"$full_note_result"
 
@@ -1711,18 +1709,18 @@ gen_full_note_commit_by_commit()
                 return 1
             fi
 
-            echo "$str" | awk -F"$SEP" -v OFS="$SEP" -v c="$prev_commit" -v stx="$STX" '{
+            echo "$str" | awk -F"$SEP" -v OFS="$SEP" -v c="$prev_commit" '{
                 if($4 != ""){
-                    print stx$1,$3,$4
+                    print $1,$3,$4
                 }
                 else{
-                    print stx$1,$2,c
+                    print $1,$2,c
                 }
             }' >"$full_note_result"
         else
 #            log "output: $prev_commit" >&2
-            echo "$commit_note" | awk -F"$SEP" -v OFS="$SEP" -v c="$prev_commit" -v stx="$STX" '{
-                print stx$1,$2,c
+            echo "$commit_note" | awk -F"$SEP" -v OFS="$SEP" -v c="$prev_commit" '{
+                print $1,$2,c
             }'>"$full_note_result"
         fi
     done
@@ -1762,12 +1760,12 @@ EOF
 
         [ "$updated" = 1 ] && echo "skip: $prev_commit" && continue
 
-        echo "update: $prev_commit"
+        echo "updated: $prev_commit"
+
 #        cat "/tmp/update-note.$$"
-#        echo "$str_new"
 
         ! note_add_file "$prev_commit" /tmp/update-note.$$ && return 1
-
+        rm -f /tmp/update-note.$$
     done
 
     return 0
@@ -1819,7 +1817,7 @@ gen_full_note_file_by_file()
             note_ts=""
         fi
 
-        echo "$file$SEP$note_ts$SEP$last_commit"
+        echo "$STX$file$SEP$note_ts$SEP$last_commit"
 
     done | LC_ALL=C sort
 
@@ -1974,9 +1972,9 @@ merge_full_note()
     commit=$3
 
     ! LC_ALL=C join -t "$SEP" -a1 -a2 -e '' -o 0,1.2,1.3,2.2 "$main" "$delta" |
-      awk -F"$SEP" -v OFS="$SEP" -v c="$commit" -v stx="$STX" '
+      awk -F"$SEP" -v OFS="$SEP" -v c="$commit" '
       {
-          print stx$1,$4?$4:$2,$4?c:$3
+          print $1,$4?$4:$2,$4?c:$3
       }
       ' && return 1
 
@@ -2145,10 +2143,10 @@ on_head_moved()
         ! preview_fs_note |
             LC_ALL=C sort |
                 LC_ALL=C join -t "$SEP" -e '' -o 1.1,1.2,2.2,2.3 - "$full_note" |
-                    awk -F"$SEP" -v OFS="$SEP" -v stx="$STX" '
+                    awk -F"$SEP" -v OFS="$SEP" '
                     {
                         if ($2 != $3) {
-                            print stx$1,$3,$4
+                            print $1,$3,$4
                         }
                     }
                     ' |
