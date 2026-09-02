@@ -2347,11 +2347,13 @@ EOF
                 do
                     [ -e "$path" ] || continue
 
-                    note_ts=$(note_get_mtime "$SUB_DIR$path" "$branch")
+                    if ! note_ts=$(note_get_mtime "$SUB_DIR$path" "$target") || [ -z "$note_ts" ]; then
+                        note_ts=$(get_commit_time "$target")
+                    fi
 
                     [ -z "$note_ts" ] && continue
 
-                    log "$branch: $files, $note_ts"
+                    log "$target: $files, $note_ts"
                     synchronize_file "$SUB_DIR$path" "$note_ts"
                 done << EOF
 $files
