@@ -1913,8 +1913,9 @@ complete_head_note()
         return 1
     fi
 
-    while IFS="$SEP" read -r file note_ts
+    while IFS="$SEP" read -r sfile note_ts
     do
+        file=$(echo "$sfile" | cut -c 2-)
         path="$REPO_ROOT/$file"
         file_ts=$(get_file_mtime "$path")
         if [ "$file_ts" -lt "$note_ts" ]; then
@@ -2092,10 +2093,13 @@ post_commit()
 
         log "build full note for $cur_commit ..."
 
-        if ! preview_full_note "$cur_commit" > "$cur_full_note"; then
+        #DO NOT redirect stdout to $cur_full_note, preview_full_note will check if exists
+        if ! preview_full_note "$cur_commit" > "$cur_full_note.$$"; then
             echo "build full note for $cur_commit failed"
             return 1
         fi
+
+        ! mv "$cur_full_note.$$" "$cur_full_note" && return 1
 
         set_file_mtime "$cur_full_note" "$(get_commit_time "$cur_commit")"
 
@@ -2153,13 +2157,13 @@ on_head_moved()
                         }
                     }
                     ' |
-                    while IFS="$SEP" read -r file note_ts last_commit
+                    while IFS="$SEP" read -r file note_ts last_commit_ts
                     do
                         ! [ -e "$REPO_ROOT/$file" ] && echo "file not exists $file" && continue
 
                         [ -n "$status_files" ] && echo "$status_files" | grep -F "$file" && echo "skip $file" && continue
 
-                        [ -z "$note_ts" ] && note_ts=$(get_commit_time "$last_commit")
+                        [ -z "$note_ts" ] && note_ts="$last_commit_ts"
 
                         set_file_mtime "$REPO_ROOT/$file" "$note_ts"
 
