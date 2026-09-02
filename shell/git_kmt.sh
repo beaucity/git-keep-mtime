@@ -2146,7 +2146,7 @@ on_head_moved()
                     awk -F"$SEP" -v OFS="$SEP" '
                     {
                         if ($2 != $3) {
-                            print $1,$3,$4
+                            print substr($1,2),$3,$4
                         }
                     }
                     ' |
