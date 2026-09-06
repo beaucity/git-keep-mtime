@@ -1761,11 +1761,11 @@ refresh_stage_note()
         last_ts=$(awk -F"$ETX" 'BEGIN {max = 0} $2!="D" && $2 > max {max = $2} END {print max}' "$stage_file")
         log "set_file_mtime: $stage_file, $last_ts"
         set_file_mtime "$stage_file" "$last_ts"
+    else
+        [ ! -s "$stage_file" ] && rm -f "$stage_file"
     fi
 
     ! rm -f "$stage_file_temp" && return 1
-
-    [ ! -s "$stage_file" ] && rm -f "$stage_file"
 
     return 0
 }
@@ -1798,8 +1798,6 @@ post_checkout_files()
     ts_checkout="$2"
     source="$3"
 
-    ! refresh_stage_note "$modified_before" && return 1
-
     #select the staged and not modifying files
     origin_git status --short --untracked-files=no | grep '^[AM]  ' | cut -c 4- |
         while IFS="$ETX" read -r path
@@ -1812,6 +1810,8 @@ post_checkout_files()
                 log "keep mtime: $path, $file_ts"
             fi
         done
+
+    ! refresh_stage_note "$modified_before" && return 1
 
     return 0
 }
@@ -2557,7 +2557,7 @@ git_command_handler()
             if select_arg "--staged" "$@"; then
                 # in this case( with --staged), the file just moved out from the stash, but not restore the file content.
                 # and commit not changed, so do not restore the mtime, just refresh the stage note.
-                ! refresh_stage_note && return 1
+                ! refresh_stage_note "$modified_before" && return 1
                 return 0
             fi
 
