@@ -1798,20 +1798,20 @@ post_checkout_files()
     ts_checkout="$2"
     source="$3"
 
-    ! refresh_stage_note "$1" && return 1
+    ! refresh_stage_note "$modified_before" && return 1
 
-    staged_not_working_files=$(origin_git status --short --untracked-files=no | grep '^[AM]  ' | cut -c 4- )
-
-    [ -n "$staged_not_working_files" ] && while IFS="$ETX" read -r path
+    #select the staged and not modifying files
+    origin_git status --short --untracked-files=no | grep '^[AM]  ' | cut -c 4- |
+        while IFS="$ETX" read -r path
         do
             file_ts=$(get_file_mtime "$path")
             if [ "$file_ts" -le "$ts_checkout" ]; then
                 log "restore: $path"
                 ! restore_mtime_from_source "$path" "$source" && return 1
+            else
+                log "keep mtime: $path, $file_ts"
             fi
-        done << EOF
-$staged_not_working_files
-EOF
+        done
 
     return 0
 }
