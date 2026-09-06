@@ -1800,7 +1800,7 @@ post_checkout_files()
 
     ! refresh_stage_note "$1" && return 1
 
-    staged_not_working_files=$(origin_git status --short --untracked-files=no | grep '^.[AM]  ' | cut -c 4- )
+    staged_not_working_files=$(origin_git status --short --untracked-files=no | grep '^[AM]  ' | cut -c 4- )
 
     [ -n "$staged_not_working_files" ] && while IFS="$ETX" read -r path
         do
@@ -2515,6 +2515,10 @@ git_command_handler()
             need_sync=1
             ;;
         add|rm|rename|checkout|restore)
+            #also can get the added files by the outputs as the following two commands
+            #git diff --name-only
+            #git diff --name-only --staged
+#            modified_before=$(origin_git status --short -z |  tr '\0' '\n' | grep '^.[M?] ' | cut -c 4-)
             modified_before=$(origin_git status --short --untracked-files=no -z |  tr '\0' '\n' | grep '^.M ' | cut -c 4-)
             ts_before=$(date +%s)
             ;;
