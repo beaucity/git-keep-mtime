@@ -2514,15 +2514,8 @@ git_command_handler()
         pull)
             need_sync=1
             ;;
-        add|rm|rename)
-            #also can get the added files by the outputs as the following two commands
-            #git diff --name-only
-            #git diff --name-only --staged
-#            modified_before=$(origin_git status --short -z |  tr '\0' '\n' | grep '^.[M?] ' | cut -c 4-)
-
+        add|rm|rename|checkout|restore)
             modified_before=$(origin_git status --short --untracked-files=no -z |  tr '\0' '\n' | grep '^.M ' | cut -c 4-)
-            ;;
-        checkout)
             ts_before=$(date +%s)
             ;;
         reset)
