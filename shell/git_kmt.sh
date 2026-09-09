@@ -2503,7 +2503,7 @@ post_revert()
 
     if [ "$old_commit_id" = "$head_commit" ]; then
         if select_arg "--abort" "$@"; then
-            ehco "rever abort"
+            echo "rever abort"
         fi
 
         ! refresh_stage_note && return 1
