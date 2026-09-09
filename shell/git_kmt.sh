@@ -2552,7 +2552,7 @@ on_head_moved()
                     [ -n "$status_files" ] && echo "$status_files" | grep -F "$file" && echo "skip $file" && continue
 
                     if [ -z "$note_ts" ]; then
-                        log "no note, use commit date"
+                        log "no note, use commit date, '$file'"
                         note_ts="$last_commit_ts"
                     fi
 
