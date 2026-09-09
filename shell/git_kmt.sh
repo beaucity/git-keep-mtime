@@ -2537,7 +2537,7 @@ on_head_moved()
 
     ! preview_fs_note "HEAD" |
         LC_ALL=C sort |
-            LC_ALL=C join -t "$ETX" -e '' -o 1.1,1.2,2.2,2.4 - "$full_note" |
+            LC_ALL=C join -t "$ETX" -e '' -o 1.1,2.2,1.2,1.4 "$full_note" - |
                 awk -F"$ETX" -v OFS="$ETX" '
                 {
                     if ($2 != $3) {
@@ -2557,7 +2557,7 @@ on_head_moved()
                     fi
 
                     if [ -z "$file_ts" ] || [ -z "$note_ts" ]; then
-                        echo "Invalid file or note timestamp: '$file_ts','$note_ts'"
+                        echo "Invalid file or note timestamp: '$file_ts','$note_ts','$file'"
                         continue
                     fi
 
