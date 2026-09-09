@@ -2556,6 +2556,11 @@ on_head_moved()
                         note_ts="$last_commit_ts"
                     fi
 
+                    if [ -z "$file_ts" ] || [ -z "$note_ts" ]; then
+                        echo "Invalid file or note timestamp: '$file_ts','$note_ts'"
+                        continue
+                    fi
+
                     if [ "$file_ts" -lt "$note_ts" ]; then
                         echo "Conflicting mtime $(format_timestamp "$note_ts") with local $(format_timestamp "$file_ts")  $file"
                         continue
