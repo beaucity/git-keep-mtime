@@ -2394,9 +2394,8 @@ post_clone()
     fi
     log "repo: $repo_dir"
 
-    cd "$repo_dir" || return 1
+    cd "$repo_dir" && init_path || return 1
 
-    init_path
     ! post_fetch && return 1
     ! on_head_moved && return 1
     return 0
@@ -2486,7 +2485,7 @@ on_head_moved()
 {
     ! refresh_stage_note && return 1
 
-    cd "$REPO_ROOT" || return 1
+    cd "$REPO_ROOT" && init_path || return 1
 
     # the un-committed(modified and staged) files should exclude from restore list
     # minus=$(sort a b | uniq)
