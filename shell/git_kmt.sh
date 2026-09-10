@@ -1506,8 +1506,6 @@ origin_git()
 {
     "$ORIGIN_APP" "$@" || log "ret: $?, params: '$*'"
 #    ret=$?
-#    [ "$ret" != 0 ] && log "ret: $ret, params: '$*'"
-#    return $ret
 }
 
 repo_root()
@@ -2044,7 +2042,7 @@ reverse_before_key() {
 
 prebuild_full_note()
 {
-    commit=$(git_rev_parse "${1:-HEAD}")
+    commit=$(git_rev_parse "${1:-HEAD}") || return 1
 
     prev_commits=$(origin_git log --pretty=format:"%H,%ct" "$commit")
 
@@ -2205,7 +2203,6 @@ show_full_note()
 update_all_commit_notes()
 {
     commit=${1:-HEAD}
-    prev_commits=$(origin_git log --pretty=format:"%H" "$commit")
 
     origin_git log --pretty=format:"%H" "$commit" | while read -r prev_commit
     do
@@ -2416,7 +2413,8 @@ get_note_file()
 
 post_clone()
 {
-    ! upstream_url=$(grep_arg '^((ssh|git|http|https)://|[^ ]+@)[^ ]+\.git$' "$@") && echo "unknown url" && return 0
+    ! upstream_url=$(grep_arg '[^ ]+\.git$' "$@") && echo "unknown url" && return 0
+#    ! upstream_url=$(grep_arg '^((ssh|git|http|https)://|[^ ]+@)[^ ]+\.git$' "$@") && echo "unknown url" && return 0
     log "url: $upstream_url"
 
     repo_dir=$(select_arg "$upstream_url" "$@")
@@ -2635,9 +2633,10 @@ post_fetch()
 
     old_note_id="$(git_rev_parse "refs/notes/kmt/mtime")"
 
-    ! origin_git fetch \
-        origin \
-        "+refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" && return 1
+    if ! origin_git fetch origin "+refs/notes/$NOTE_REF:refs/notes/$NOTE_REF"; then
+        ! origin_git ls-remote --exit-code origin "refs/notes/$NOTE_REF" && echo "ref not exists" && return 0
+        return 1
+    fi
 
     new_note_id=$(git_rev_parse "refs/notes/kmt/mtime")
 
@@ -2680,7 +2679,7 @@ get_current_head()
     git_rev_parse HEAD
     ret=$?
     if [ "$ret" != 0 ]; then
-        commits_count=$(origin_git log --pretty=format:"%H,%ct" | grep -c "") && [ "$commits_count" -eq "0" ] && return 0
+        commits_count=$(origin_git log --pretty=format:"%H,%ct" 2> /dev/null | grep -c "") && [ "$commits_count" -eq "0" ] && return 0
     fi
 
     return $ret
@@ -2692,7 +2691,7 @@ get_prev_commit()
     git_rev_parse "$commit~1"
     ret=$?
     if [ "$ret" != 0 ]; then
-        commits_count=$(origin_git log --pretty=format:"%H,%ct" "$commit" | grep -c "") && [ "$commits_count" -eq "1" ] && return 0
+        commits_count=$(origin_git log --pretty=format:"%H,%ct" "$commit" 2>/dev/null | grep -c "") && [ "$commits_count" -eq "1" ] && return 0
     fi
 
     return $ret
@@ -2701,29 +2700,6 @@ get_prev_commit()
 current_branch()
 {
     origin_git branch --show-current
-}
-
-synchronize_range()
-{
-    from_commit=$1
-    to_commit=$2
-
-    echo "synchronize_range $from_commit to $to_commit"
-
-    if [ "$from_commit" = "$to_commit" ]; then
-        commits="$to_commit"
-    else
-        commits=$(origin_git log --pretty=format:"%H" --reverse "$from_commit".."$to_commit")
-    fi
-
-    echo "$commits" | while read -r cmt
-    do
-        log "synchronize $cmt ..."
-        ! synchronize_commit "$cmt" && echo "synchronize $cmt failed." && return 1
-        log "synchronize $cmt ok."
-    done
-
-    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -2866,11 +2842,6 @@ git_command_handler()
 
             ;;
     esac
-
-#    if [ "$need_sync" = "1" ]; then
-#        [ "$cmd" = "reset" ] && OLD=HEAD
-#        ! synchronize_range "$old_commit_id" HEAD && return 1
-#    fi
 
     return 0
 }
