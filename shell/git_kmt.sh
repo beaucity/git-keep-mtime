@@ -2497,7 +2497,7 @@ on_head_moved()
         ! rebuild_full_note "$cur_commit" && return 1
     fi
 
-    log "restore mtime by full note $full_note"
+    log "restore mtimes from full note $full_note"
 
     ! preview_fs_note "HEAD" |
         LC_ALL=C sort |
