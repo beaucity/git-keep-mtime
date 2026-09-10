@@ -2486,6 +2486,8 @@ on_head_moved()
 {
     ! refresh_stage_note && return 1
 
+    cd "$REPO_ROOT" || return 1
+
     # the un-committed(modified and staged) files should exclude from restore list
     # minus=$(sort a b | uniq)
     status_files=$(get_status_files --untracked-files=no | cut -c 4-)
