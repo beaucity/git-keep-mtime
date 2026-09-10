@@ -1805,6 +1805,11 @@ batch_stat_ex()
     fi
 }
 
+get_status_files()
+{
+    origin_git status --short -z "$@" | tr '\0' '\n'
+}
+
 refresh_stage_note()
 {
     modified_before=$1
@@ -1813,7 +1818,7 @@ refresh_stage_note()
     # the mtimes of them should be refreshed by stat(ed) values
     newly_added_files=
     if [ -n "$modified_before" ]; then
-        newly_added_files=$(origin_git status --short -z| tr '\0' '\n' | grep '^[^ ]  ' | cut -c 4- |
+        newly_added_files=$(get_status_files | grep '^[^ ]  ' | cut -c 4- |
             while read -r staged_file
             do
                 echo "$modified_before" | grep -Fx "$staged_file"
@@ -1829,7 +1834,7 @@ refresh_stage_note()
 
     [ -f "$stage_file_temp" ] && rm -f "$stage_file_temp"
 
-    origin_git status --short -z | tr '\0' '\n' | grep '^[AMD]. ' |
+    get_status_files | grep '^[AMD]. ' |
         while IFS= read -r line
         do
             staged_flag=$(echo "$line"| cut -c 1-1)
@@ -1860,7 +1865,7 @@ refresh_stage_note()
     if [ -s "$stage_file_temp" ]; then
         cat < "$stage_file_temp" | LC_ALL=C sort > "$stage_file"
         last_ts=$(awk -F"$ETX" 'BEGIN {max = 0} $2!="D" && $2 > max {max = $2} END {print max}' "$stage_file")
-        log "set_file_mtime: $stage_file, $last_ts"
+        log "set stage file mtime: $last_ts"
         set_file_mtime "$stage_file" "$last_ts"
     else
         [ ! -s "$stage_file" ] && rm -f "$stage_file"
@@ -1960,7 +1965,7 @@ post_checkout_files()
     source="$3"
 
     #select the staged and not modifying files
-    origin_git status --short --untracked-files=no | grep '^[AM]  ' | cut -c 4- |
+    get_status_files | grep '^[AM]  ' | cut -c 4- |
         while IFS="$ETX" read -r path
         do
             file_ts=$(get_file_mtime "$path")
@@ -2238,7 +2243,7 @@ complete_head_note()
     if ! [ -f "$pre_stage_file" ]; then
 
         #check if the head commit has modified, the mtime may changed invalid
-        status_files=$(origin_git status --short --untracked-files=no | cut -c 4-)
+        status_files=$(get_status_files --untracked-files=no | cut -c 4-)
         [ -n "$status_files" ] && echo "head commit modified" && return 1
 
         #stage file missing, find completable files if mtime is valid
@@ -2397,11 +2402,6 @@ post_clone()
     return 0
 }
 
-post_commit_to_stash()
-{
-    refresh_stage_note "$1"
-}
-
 prev_commit()
 {
     now_ts=$(date +%s)
@@ -2488,7 +2488,7 @@ on_head_moved()
 
     # the un-committed(modified and staged) files should exclude from restore list
     # minus=$(sort a b | uniq)
-    status_files=$(origin_git status --short --untracked-files=no | cut -c 4-)
+    status_files=$(get_status_files --untracked-files=no | cut -c 4-)
 
     ! cur_commit=$(get_current_head) && return 1
     full_note=$(get_note_file "$cur_commit" "full")
@@ -2513,7 +2513,7 @@ on_head_moved()
                 do
                     ! [ -e "$REPO_ROOT/$file" ] && echo "file not exists $file" && continue
 
-                    [ -n "$status_files" ] && echo "$status_files" | grep -F "$file" && echo "skip $file" && continue
+                    [ -n "$status_files" ] && echo "$status_files" | grep -Fxq "$file" && echo "skip $file" && continue
 
                     if [ -z "$note_ts" ]; then
                         log "no note, use commit date, '$file'"
@@ -2696,7 +2696,7 @@ git_command_handler()
             #also can get the added files by the outputs as the following two commands
             #git diff --name-only
             #git diff --name-only --staged
-            modified_before=$(origin_git status --short --untracked-files=no -z |  tr '\0' '\n' | grep '^.M ' | cut -c 4-)
+            modified_before=$(get_status_files --untracked-files=no | grep '^.M ' | cut -c 4-)
             ts_before=$(date +%s)
             ;;
         reset)
@@ -2718,25 +2718,25 @@ git_command_handler()
             ! post_clone "$@" && return 1
             ;;
         add|rm|rename)
-            log "post $cmd"
-            ! post_commit_to_stash "$modified_before" && echo "$cmd succeeded but timestamp note $cmd failed." && return 1
-            log "KMT: mtime $cmd."
+            log "post $cmd ..."
+            ! refresh_stage_note "$modified_before" && echo "$cmd succeeded but timestamp note $cmd failed." && return 1
+            log "post $cmd ok"
             ;;
         commit)
-            log "post commit ..."
+            log "post $cmd ..."
 
             ! post_commit && echo "commit succeeded but timestamp note creation failed." && return 1
 
-            log "KMT: notes added."
+            log "post $cmd ok"
             ;;
         merge)
             log "post merge ..."
             # merge creates a new commit in the usual non-ff case.  If it did, create
             # its note; afterwards synchronize the resulting HEAD.
 
-            ! post_commit && echo "commit succeeded but timestamp note creation failed." && return 1
+            ! post_commit && echo "merge succeeded but timestamp note creation failed." && return 1
 
-            log "KMT: notes added."
+            log "post $cmd ok"
             ;;
         restore)
             if select_arg "--staged" "$@"; then
@@ -2797,7 +2797,7 @@ git_command_handler()
 
             ! post_push && echo "Git push succeeded but timestamp note push failed." && return 1
 
-            echo "KMT: notes pushed."
+            log "post $cmd ok"
             ;;
         fetch)
             post_fetch "$old_commit_id"
@@ -2808,7 +2808,7 @@ git_command_handler()
 
             ! post_pull "$old_commit_id" && echo "Git pull succeeded but timestamp note fetch failed." && return 1
 
-            echo "KMT: notes fetched."
+            log "post $cmd ok"
 
             ;;
     esac
@@ -3065,14 +3065,15 @@ app_is_update_to_date()
     return 0
 }
 
+
 app_get_files_2_commit()
 {
-    #check working copy
+    #select diff to stage files
     str=$(origin_git diff --name-only --relative -- .)
     [ -n "$str" ] && echo "$str" && return 0
 
-    #check added to stage but not committed files
-    str=$(origin_git status --short | grep "^[^?].*" |cut -c 4-)
+    #select added to stage but not committed files
+    str=$(get_status_files | grep "^[^?].*" |cut -c 4-)
     [ -n "$str" ] && echo "$str" && return 0
 
     return 0
