@@ -894,6 +894,14 @@ kmt_upgrade()
 # Single-record access
 # ---------------------------------------------------------------------------
 
+last_commit_of_file()
+{
+    path="$1"
+    to_commit="${2:-HEAD}"
+    origin_git log -1 "$to_commit" --format='%H' -- "$path"
+}
+
+
 # note_show <commit>
 #   Print the whole note for a commit. Returns non-zero if no note.
 note_show()
@@ -905,38 +913,13 @@ note_show()
 #   Print the value for <key>. Returns non-zero if key not present.
 note_get()
 {
-    _ng_commit=$1
-    _ng_key=$2
+    commit=$1
+    key=$2
 
-    ! _ng_line=$(note_show "$_ng_commit" | grep -m 1 -F "$STX$_ng_key$ETX") && return 1
+    ! line=$(note_show "$commit" | grep -m 1 -F "$STX$key$ETX") && return 1
 
-    echo "${_ng_line#*"$ETX"}"
+    echo "${line#*"$ETX"}"
     return 0
-}
-
-# note_get_or <commit> <key> <fallback-value>
-#   Print value for <key>, or <fallback-value> if key missing or commit empty.
-#   (Replaces original "use_commit_ts_when_failed" mode)
-note_get_or()
-{
-    _ng_commit=$1
-    _ng_key=$2
-    _ng_fallback=$3
-
-    if _ng_val=$(note_get "$_ng_commit" "$_ng_key"); then
-        echo "$_ng_val"
-        return 0
-    fi
-
-    echo "$_ng_fallback"
-    return 0
-}
-
-# note_has <commit> <key>
-#   Return 0 if key exists in the note.
-note_has()
-{
-    note_show "$1" | grep -q -F "$STX$2$ETX"
 }
 
 # ---------------------------------------------------------------------------
@@ -964,32 +947,23 @@ note_remove()
 #   These functions operate on those files, not on Git notes.
 # ---------------------------------------------------------------------------
 
-# note_file_find <file> <key>
-#   Find a record in a local note file. Uses `look` when available.
-note_file_find()
-{
-    _nf_file=$1
-    _nf_key=$2
-
-    [ ! -f "$_nf_file" ] && return 1
-
-    if [ "$IS_LOOK_INSTALLED" = "1" ]; then
-        ! _nf_line=$(look -t "$ETX" "$_nf_key$ETX" "$_nf_file") && return 1
-    else
-        ! _nf_line=$(grep -m 1 -F "$_nf_key$ETX" "$_nf_file") && return 1
-    fi
-
-    echo "$_nf_line"
-    return 0
-}
-
 # note_file_get <file> <key>
 #   Print the value for <key> from a local note file.
 note_file_get()
 {
-    ! _ngf_line=$(note_file_find "$1" "$2") && return 1
-    _ngf_val=${_ngf_line#*"$ETX"}
-    echo "${_ngf_val%%"$ETX"*}"
+    key="$1"
+    file="$2"
+
+    [ ! -f "$file" ] && return 1
+
+    if [ "$IS_LOOK_INSTALLED" = "1" ]; then
+        ! line=$(look -t "$ETX" "$key$ETX" "$file") && return 1
+    else
+        ! line=$(grep -m 1 -F "$key$ETX" "$file") && return 1
+    fi
+
+    val=${line#*"$ETX"}
+    echo "${val%%"$ETX"*}"
     return 0
 }
 
@@ -1027,24 +1001,30 @@ note_parse()
     esac
 }
 
-note_merge_with_delta()
-{
-    main_note=$1
-    delta=$2
-    commit_id=$3
-    commit_ts=$4
+# ---------------------------------------------------------------------------
+# Path and mtime note processing
+# ---------------------------------------------------------------------------
 
-    echo "$delta" | LC_ALL=C join -t "$ETX" -a1 -a2 -e '' -o 0,1.2,1.3,1.4,2.1,2.2 "$main_note" - |
-        awk -F"$ETX" -v OFS="$ETX" -v ci="$commit_id" -v ct="$commit_ts" '
-        {
-            if($5 == "" && $1 != ""){
-                print $1,$2,$3,$4
-            }
-            else if($5 != "" && $6 != "D"){
-                print $5,$6,ci,ct
-            }
-        }
-        '
+# Look up the mtime of a file from a specific commit's note.
+# If commit not specified, find the file's last commit first.
+note_get_mtime()
+{
+    rpath=$1
+    commit=$2
+
+    [ -z "$commit" ] && commit=$(last_commit_of_file "${rpath#*"${SUB_DIR}"}" "$commit")
+
+    note_get "$commit" "$rpath"
+}
+
+# Look up the mtime of a file from a local note file.
+# Wrapper around note_file_get from note.sh (kept for legacy call sites).
+note_get_mtime_ex()
+{
+    spath=$1
+    note_file=$2
+
+    note_file_get "$spath" "$note_file"
 }
 
 
@@ -1706,11 +1686,35 @@ is_head()
     commit=${1}
     [ -z "$commit" ] && return 1
 
-    if [ "$(git_rev_parse "$commit")" = "$(get_current_head)" ]; then
-        return 0
+    [ "$(git_rev_parse "$commit")" = "$(get_current_head)" ]
+}
+
+get_current_head()
+{
+    git_rev_parse HEAD
+    ret=$?
+    if [ "$ret" != 0 ]; then
+        commits_count=$(origin_git log --pretty=format:"%H,%ct" 2> /dev/null | grep -c "") && [ "$commits_count" -eq "0" ] && return 0
     fi
 
-    return 1
+    return $ret
+}
+
+get_prev_commit()
+{
+    commit=${1:-HEAD}
+    git_rev_parse "$commit~1"
+    ret=$?
+    if [ "$ret" != 0 ]; then
+        commits_count=$(origin_git log --pretty=format:"%H,%ct" "$commit" 2>/dev/null | grep -c "") && [ "$commits_count" -eq "1" ] && return 0
+    fi
+
+    return $ret
+}
+
+current_branch()
+{
+    origin_git branch --show-current
 }
 
 get_commit_time()
@@ -1718,16 +1722,9 @@ get_commit_time()
     origin_git show -s --format='%ct' "${1:-HEAD}"
 }
 
-last_commit_for_file()
-{
-    path="$1"
-    to_commit="${2:-HEAD}"
-    origin_git log -1 "$to_commit" --format='%H' -- "$path"
-}
-
 # Output: <STX>path<ETX>commit<ETX>commit_ts
 # for every still-existing file, using its most recent A/M commit.
-last_commit_for_files()
+last_commit_of_files()
 {
     origin_git log --pretty=format:"%H,%ct" --name-status --no-renames -z HEAD | tr '\0' '\n' |
         awk -F, -v OFS="$ETX" -v stx="$STX" '
@@ -1746,36 +1743,10 @@ last_commit_for_files()
     return $?
 }
 
-# ---------------------------------------------------------------------------
-# Path and mtime note processing
-# ---------------------------------------------------------------------------
-
-# Look up the mtime of a file from a specific commit's note.
-# If commit is empty, find the file's last commit first.
-note_get_mtime()
-{
-    wanted=$1
-    commit=$2
-
-    [ -z "$commit" ] && commit=$(last_commit_for_file "$wanted" "$commit")
-
-    note_get "$commit" "$wanted"
-}
-
-# Look up the mtime of a file from a local note file.
-# Wrapper around note_file_get from note.sh (kept for legacy call sites).
-note_get_mtime_ex()
-{
-    wanted=$1
-    note_file=$2
-
-    note_file_get "$note_file" "$wanted"
-}
-
 # Look up the mtime of a file in the current HEAD's stage note.
 stage_get_mtime()
 {
-    wanted=$1
+    rpath=$1
 
     ! head_commit=$(get_current_head) && return 1
 
@@ -1783,15 +1754,7 @@ stage_get_mtime()
 
     [ ! -f "$stage_file" ] && return 1
 
-    note_file_get "$stage_file" "$wanted"
-}
-
-valid_note_line()
-{
-    path=$1
-    ts=$2
-    [ -n "$path" ] || return 1
-    is_timestamp "$ts"
+    note_file_get "$STX$rpath" "$stage_file"
 }
 
 batch_stat_ex()
@@ -1805,10 +1768,37 @@ batch_stat_ex()
     fi
 }
 
+synchronize_file()
+{
+    rpath=$1
+    ts=$2
+
+    path="$REPO_ROOT/$rpath"
+
+    ! [ -e "$path" ] && return 1
+
+    file_ts=$(get_file_mtime "$path") || return 1
+
+    [ "$file_ts" = "$ts" ] && return 0
+
+    ! set_file_mtime "$path" "$ts" &&
+        echo "failed to synchronize mtime '$path'" &&
+        return 1
+
+    fast_format_timestamp "$ts"
+    echo "Synchronized mtime $TM_RET '$rpath'"
+
+    return 0
+}
+
 get_status_files()
 {
     origin_git status --short -z "$@" | tr '\0' '\n'
 }
+
+# ---------------------------------------------------------------------------
+# Local note management
+# ---------------------------------------------------------------------------
 
 refresh_stage_note()
 {
@@ -1865,7 +1855,7 @@ refresh_stage_note()
     if [ -s "$stage_file_temp" ]; then
         cat < "$stage_file_temp" | LC_ALL=C sort > "$stage_file"
         last_ts=$(awk -F"$ETX" 'BEGIN {max = 0} $2!="D" && $2 > max {max = $2} END {print max}' "$stage_file")
-        log "set stage file mtime: $last_ts"
+#        log "set stage file mtime: $last_ts"
         set_file_mtime "$stage_file" "$last_ts"
     else
         [ ! -s "$stage_file" ] && rm -f "$stage_file"
@@ -1874,133 +1864,6 @@ refresh_stage_note()
     ! rm -f "$stage_file_temp" && return 1
 
     return 0
-}
-
-restore_mtime_from_source()
-{
-    path="$1"
-    source="$2"
-
-    [ ! -e "$path" ] && return 1
-
-    #the target may not the real commit of $path
-    last_commit=$(last_commit_for_file "$SUB_DIR$path" "$source")
-
-    if ! note_ts=$(note_get_mtime "$SUB_DIR$path" "$last_commit") || [ -z "$note_ts" ]; then
-        note_ts=$(get_commit_time "$last_commit")
-    fi
-
-    [ -z "$note_ts" ] && return 1
-
-    log "$last_commit: $files, $note_ts"
-    ! synchronize_file "$SUB_DIR$path" "$note_ts" && return 1
-
-    return 0
-}
-
-
-post_restore_file()
-{
-    file="$1"
-    source="$2"
-
-    if stage_ts=$(stage_get_mtime "$file") && [ -n "$stage_ts" ]; then
-        note_ts="$stage_ts"
-        if [ "D" = "$note_ts" ]; then
-            ! note_ts=$(note_get_mtime "$file" "$source") && return 1
-            [ -z "$note_ts" ] && note_ts=$(get_commit_time "$source")
-            log "restore from last commit: $note_ts"
-        else
-            log "restore from stage: $stage_ts"
-        fi
-    else
-        ! note_ts=$(note_get_mtime "$file" "$source") && return 1
-        [ -z "$note_ts" ] && note_ts=$(get_commit_time "$source")
-        log "restore from source: $source, $note_ts"
-    fi
-
-    [ -z "$note_ts" ] && echo "no timestamp to restore" && return 0
-
-    ! synchronize_file "$file" "$note_ts" && return 1
-
-    return 0
-}
-
-post_restore_files()
-{
-    files="$1"
-    cmd_ts="$2"
-    source="${3:-HEAD}"
-
-    [ -n "$files" ] && while IFS= read -r path;
-    do
-        [ -e "$path" ] || continue
-
-        if [ -d "$path" ]; then
-            # restore the mtime for each files which fs mtime later then $ts_before in $sub_files
-            sub_files=$(preview_fs_note "HEAD" "$path")
-            [ -n "$sub_files" ] && while IFS="$ETX" read -r file file_ts
-                do
-                    [ "$file_ts" -lt "$cmd_ts" ] && continue
-                    ! post_restore_file "$file" "$source" && return 1
-                done <<EOF
-$sub_files
-EOF
-        else
-            file_ts=$(get_file_mtime "$path")
-            [ "$file_ts" -lt "$cmd_ts" ] && continue
-
-            ! post_restore_file "$SUB_DIR$path" "$source" && return 1
-        fi
-    done << EOF
-$files
-EOF
-    return 0
-}
-
-post_checkout_files()
-{
-    modified_before=$1
-    ts_checkout="$2"
-    source="$3"
-
-    #select the staged and not modifying files
-    get_status_files | grep '^[AM]  ' | cut -c 4- |
-        while IFS="$ETX" read -r path
-        do
-            file_ts=$(get_file_mtime "$path")
-            if [ "$file_ts" -le "$ts_checkout" ]; then
-                log "restore: $path"
-                ! restore_mtime_from_source "$path" "$source" && return 1
-            else
-                log "keep mtime: $path, $file_ts"
-            fi
-        done
-
-    ! refresh_stage_note "$modified_before" && return 1
-
-    return 0
-}
-
-
-show_stage_note()
-{
-    commit=$(git_rev_parse "${1:-HEAD}")
-
-    stage_file=$(get_note_file "$commit" "stage")
-
-    [ ! -f "$stage_file" ] && echo "no stage.">&2 && return 1
-
-    cat "$stage_file"
-
-    return 0
-}
-
-preview_fs_note()
-{
-    commit=${1:-HEAD}
-    path=${2:-${SUB_DIR:-${REPO_ROOT}}}
-    origin_git ls-tree -r --full-tree --name-only "$commit" -z -- "$path" | batch_stat_ex
 }
 
 get_committed_files()
@@ -2109,7 +1972,7 @@ EOF
 
     commits_count=$(echo "$commits_to_merge"| grep -c "")
 
-    ! all_files=$(last_commit_for_files "$commit") && return 1
+    ! all_files=$(last_commit_of_files "$commit") && return 1
 
     files_count=$(echo "$all_files"| grep -c "")
 
@@ -2217,21 +2080,38 @@ EOF
     return 0
 }
 
-show_full_note()
+get_note_file()
 {
     commit=$1
-    if [ -z "$commit" ]; then
-        ! commit=$(get_current_head) && return 1
+    cate=$2
+
+    if [ ! -e "$GIT_DIR/kmt/" ]; then
+        ! mkdir -p "$GIT_DIR/kmt/" && echo "mk kmt dir failed" && return 1
     fi
 
-    note_file=$(get_note_file "$commit" "full")
-    if [ ! -f "$note_file" ]; then
-        echo "full-index-note not exists" >&2
-        return 1
-    fi
+    echo "$GIT_DIR/kmt/$commit.$cate.note"
 
-    cat "$note_file"
     return 0
+}
+
+note_merge_with_delta()
+{
+    main_note=$1
+    delta=$2
+    commit_id=$3
+    commit_ts=$4
+
+    echo "$delta" | LC_ALL=C join -t "$ETX" -a1 -a2 -e '' -o 0,1.2,1.3,1.4,2.1,2.2 "$main_note" - |
+        awk -F"$ETX" -v OFS="$ETX" -v ci="$commit_id" -v ct="$commit_ts" '
+        {
+            if($5 == "" && $1 != ""){
+                print $1,$2,$3,$4
+            }
+            else if($5 != "" && $6 != "D"){
+                print $5,$6,ci,ct
+            }
+        }
+        '
 }
 
 complete_head_note()
@@ -2258,6 +2138,113 @@ complete_head_note()
         echo "add head note failed: $pre_stage_file"
         return 1
     fi
+
+    return 0
+}
+
+on_head_moved()
+{
+    ! refresh_stage_note && return 1
+
+    cd "$REPO_ROOT" && init_path || return 1
+
+    # the un-committed(modified and staged) files should exclude from restore list
+    # minus=$(sort a b | uniq)
+    status_files=$(get_status_files --untracked-files=no | cut -c 4-)
+
+    ! cur_commit=$(get_current_head) && return 1
+    full_note=$(get_note_file "$cur_commit" "full")
+
+    if [ ! -s "$full_note" ]; then
+        ! rebuild_full_note "$cur_commit" && return 1
+    fi
+
+    log "restore mtimes from full note $full_note"
+
+    ! preview_fs_mtime "HEAD" |
+        LC_ALL=C sort |
+            LC_ALL=C join -t "$ETX" -e '' -o 1.1,2.2,1.2,1.4 "$full_note" - |
+                awk -F"$ETX" -v OFS="$ETX" '
+                {
+                    if ($2 != $3) {
+                        print substr($1,2),$2,$3,$4
+                    }
+                }
+                ' |
+                while IFS="$ETX" read -r file file_ts note_ts last_commit_ts
+                do
+                    ! [ -e "$REPO_ROOT/$file" ] && echo "file not exists $file" && continue
+
+                    [ -n "$status_files" ] && echo "$status_files" | grep -Fxq "$file" && echo "skip $file" && continue
+
+                    if [ -z "$note_ts" ]; then
+                        log "no note, use commit date, '$file'"
+                        note_ts="$last_commit_ts"
+                    fi
+
+                    if [ -z "$file_ts" ] || [ -z "$note_ts" ]; then
+                        echo "Invalid file or note timestamp: '$file_ts','$note_ts','$file'"
+                        continue
+                    fi
+
+                    if [ "$file_ts" -lt "$note_ts" ]; then
+                        echo "Conflicting mtime $(format_timestamp "$note_ts") with local $(format_timestamp "$file_ts")  $file"
+                        continue
+                    fi
+
+                    ! set_file_mtime "$REPO_ROOT/$file" "$note_ts" && return 1
+
+                    fast_format_timestamp "$note_ts"
+                    log "synchronize: $TM_RET $file, $note_ts, $file_ts"
+
+                done
+
+    return 0
+}
+
+refresh_later_full_notes()
+{
+    commit_id="$1"
+
+    if [ ! -e "$GIT_DIR/kmt/" ]; then
+        return 0
+    fi
+
+    delta_note=$(note_show "$commit_id")
+
+    log "update all exists full note with commit note, $commit_id"
+
+    full_note_files=$(find "$GIT_DIR"/kmt/*.full.note)
+
+    [ -n "$full_note_files" ] && while IFS= read -r file
+    do
+        if ! grep -m 1 -F "$ETX$commit_id$ETX" "$file"; then
+#            log "skip $file"
+            continue
+        fi
+
+        echo "$delta_note" | LC_ALL=C join -t "$ETX" -a1 -o 1.1,1.2,1.3,1.4,2.1,2.2 "$file" - |
+            awk -F"$ETX" -v OFS="$ETX" -v ci="$commit_id" '
+            {
+                if($3 == ci){
+                    print $1,$6,$3,$4
+                }
+                else{
+                    print $1,$2,$3,$4
+                }
+            }
+            ' > "$file.new.$$"
+
+        full_note_file_ts=$(get_file_mtime "$file")
+        ! set_file_mtime "$file.new.$$" "$full_note_file_ts" && return 1
+
+        ! mv "$file.new.$$" "$file" && return 1
+
+        log "update full note ok: $file"
+
+    done << EOF
+$full_note_files
+EOF
 
     return 0
 }
@@ -2303,82 +2290,164 @@ rebuild_commit_note()
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Synchronization
-# ---------------------------------------------------------------------------
-
-#$1 path to root
-#$2  timestamp to set
-synchronize_file()
+rebuild_full_note()
 {
-    p2r=$1
-    ts=$2
+    commit="${1:-HEAD}"
+    full_note_file=$(get_note_file "$commit" "full")
 
-    path="$REPO_ROOT/$p2r"
+    ! ( prebuild_full_note "$commit" > "$full_note_file.temp.$$" ) && return 1
 
-    ! [ -e "$path" ] && return 0
+    ! mv "$full_note_file.temp.$$" "$full_note_file" && return 1
 
-    file_ts=$(get_file_mtime "$path") || return 1
-
-    [ "$file_ts" = "$ts" ] && return 0
-
-    ! set_file_mtime "$path" "$ts" &&
-        echo "failed to synchronize mtime '$p2r'" &&
-        return 1
-
-    echo "Synchronized mtime $(format_timestamp "$ts") '$p2r'"
+    ! set_file_mtime "$full_note_file" "$(get_commit_time "$commit")" && return 1
 
     return 0
 }
 
-synchronize_commit()
+checkout_mtime_from_source()
 {
-    commit=$1
+    rpath="$1"
+    source="$2"
 
-    if ! note=$(note_show "$commit"); then
-        echo "$note" | grep 'not found' && return 0
+    [ ! -e "$REPO_ROOT/$rpath" ] && echo "file not found: $rpath" && return 1
+
+    #get the real commit of $path to the specified source"
+    ! last_commit=$(last_commit_of_file "${rpath#*"${SUB_DIR}"}" "$source") && return 1
+
+    if ! note_ts=$(note_get_mtime "$rpath" "$last_commit") || [ -z "$note_ts" ]; then
+        note_ts=$(get_commit_time "$last_commit")
     fi
 
-    [ -z "$note" ] && return 1
+    [ -z "$note_ts" ] && echo "no timestamp to restore" && return 0
 
-    count=0
-    failed=0
-    while IFS="$ETX" read -r path ts rest; do
-        [ -n "$rest" ] && continue
-        valid_note_line "$path" "$ts" || continue
-        if synchronize_file "$path" "$ts"; then
-            count=$((count + 1))
+#    log "$rpath, $note_ts, $last_commit"
+
+    ! synchronize_file "$rpath" "$note_ts" && return 1
+
+    return 0
+}
+
+restore_file_from_source()
+{
+    rpath="$1"
+    source="$2"
+
+    if [ -z "$source" ]; then
+        if stage_ts=$(stage_get_mtime "$rpath") && [ -n "$stage_ts" ]; then
+            if [ "D" = "$stage_ts" ]; then
+                log "restore from last commit"
+                ! checkout_mtime_from_source "$rpath" && return 1
+            else
+                log "restore from stage: $stage_ts"
+                ! synchronize_file "$rpath" "$stage_ts" && return 1
+            fi
         else
-            failed=$((failed + 1))
+            log "restore from last commit"
+            ! checkout_mtime_from_source "$rpath" && return 1
         fi
-    done <<EOF2
-$note
-EOF2
-
-    log "Synchronized $count files; failed: $failed."
-    [ "$failed" -eq 0 ]
-}
-
-synchronize_head()
-{
-    ! commit=$(get_current_head) && return 1
-    synchronize_commit "$commit"
-}
-
-# ---------------------------------------------------------------------------
-# Commit / post-commit
-# ---------------------------------------------------------------------------
-
-get_note_file()
-{
-    commit=$1
-    cate=$2
-
-    if [ ! -e "$GIT_DIR/kmt/" ]; then
-        ! mkdir -p "$GIT_DIR/kmt/" && echo "mk kmt dir failed" && return 1
+    else
+        log "checkout mtime from source: $source, '$rpath'"
+        ! checkout_mtime_from_source "$rpath" "$source" && return 1
     fi
 
-    echo "$GIT_DIR/kmt/$commit.$cate.note"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Maintenance / inspection commands
+# ---------------------------------------------------------------------------
+
+show_commit_note()
+{
+    ! commit=$(git_rev_parse "${1:-HEAD}") && echo "get commit-id failed $1" && return 1
+
+    ! note_show "$commit" &&  return 1
+
+    return 0
+}
+
+show_history()
+{
+    path=$1
+    commit=${2:-HEAD}
+
+    [ -z "$path" ] && echo "history requires a file path" && return 1
+
+    # if you want to track the rename history, add --follow and --name-staus to git log
+    # read out the origin name when renamed, use origin name to show history mtimes
+    # THIS has not implemented yet.
+
+    ! prev_commits=$(origin_git log --format='%H,%cI' "$commit" -- "$path") && return 1
+
+    [ -z "$prev_commits" ] && echo "no history" && return 0
+
+    echo "$prev_commits" |
+        while IFS="," read -r commit date; do
+            note_ts=$(note_get_mtime "$SUB_DIR$path" "$commit")
+            if [ -n "$note_ts" ]; then
+                printf '%s | %s | %s | %s\n' "$commit" "$date" "$note_ts" "$(format_timestamp "$note_ts")"
+            else
+                printf '%s | %s | %10s | %s\n' "$commit" "$date" "$note_ts" "$(format_timestamp "")"
+            fi
+        done
+}
+
+preview_fs_mtime()
+{
+    commit=${1:-HEAD}
+    path=${2:-${SUB_DIR:-${REPO_ROOT}}}
+    origin_git ls-tree -r --full-tree --name-only "$commit" -z -- "$path" | batch_stat_ex
+}
+
+show_stage_note()
+{
+    commit=$(git_rev_parse "${1:-HEAD}")
+
+    stage_file=$(get_note_file "$commit" "stage")
+
+    [ ! -f "$stage_file" ] && echo "no stage.">&2 && return 1
+
+    cat "$stage_file"
+
+    return 0
+}
+
+show_full_note()
+{
+    commit=$1
+    if [ -z "$commit" ]; then
+        ! commit=$(get_current_head) && return 1
+    fi
+
+    note_file=$(get_note_file "$commit" "full")
+    if [ ! -f "$note_file" ]; then
+        echo "full-index-note not exists" >&2
+        return 1
+    fi
+
+    cat "$note_file"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# prev / post-hooks
+# ---------------------------------------------------------------------------
+
+prev_commit()
+{
+    now_ts=$(date +%s)
+    head_commit=$(get_current_head)
+    stage_file=$(get_note_file "$head_commit" "stage")
+    [ ! -f "$stage_file" ] && return 0
+    log "on prev commit: $stage_file"
+    while IFS="$ETX" read -r file file_ts
+    do
+        log "check: $file, $file_ts, $now_ts"
+        if [ "$file_ts" != "D" ] && [ "$file_ts" -gt "$now_ts" ]; then
+            echo "The file mtime can not be committed, because it is in the future. $(format_timestamp "$file_ts") $file"
+            return 2
+        fi
+    done < "$stage_file"
 
     return 0
 }
@@ -2398,25 +2467,6 @@ post_clone()
 
     ! post_fetch && return 1
     ! on_head_moved && return 1
-    return 0
-}
-
-prev_commit()
-{
-    now_ts=$(date +%s)
-    head_commit=$(get_current_head)
-    stage_file=$(get_note_file "$head_commit" "stage")
-    [ ! -f "$stage_file" ] && return 0
-    log "on prev commit: $stage_file"
-    while IFS="$ETX" read -r file file_ts
-    do
-        log "check: $file, $file_ts, $now_ts"
-        if [ "$file_ts" != "D" ] && [ "$file_ts" -gt "$now_ts" ]; then
-            echo "The file mtime can not be committed, because it is in the future. $(format_timestamp "$file_ts") $file"
-            return 2
-        fi
-    done < "$stage_file"
-
     return 0
 }
 
@@ -2481,62 +2531,58 @@ post_revert()
     return 0
 }
 
-on_head_moved()
+post_restore_files()
 {
-    ! refresh_stage_note && return 1
+    files="$1"
+    cmd_ts="$2"
+    source="$3"
 
-    cd "$REPO_ROOT" && init_path || return 1
+    [ -n "$files" ] && while IFS= read -r path;
+    do
+        [ ! -e "$path" ] && echo "file not found $path" && continue
 
-    # the un-committed(modified and staged) files should exclude from restore list
-    # minus=$(sort a b | uniq)
-    status_files=$(get_status_files --untracked-files=no | cut -c 4-)
-
-    ! cur_commit=$(get_current_head) && return 1
-    full_note=$(get_note_file "$cur_commit" "full")
-
-    if [ ! -s "$full_note" ]; then
-        ! rebuild_full_note "$cur_commit" && return 1
-    fi
-
-    log "restore mtimes from full note $full_note"
-
-    ! preview_fs_note "HEAD" |
-        LC_ALL=C sort |
-            LC_ALL=C join -t "$ETX" -e '' -o 1.1,2.2,1.2,1.4 "$full_note" - |
-                awk -F"$ETX" -v OFS="$ETX" '
-                {
-                    if ($2 != $3) {
-                        print substr($1,2),$2,$3,$4
-                    }
-                }
-                ' |
-                while IFS="$ETX" read -r file file_ts note_ts last_commit_ts
+        if [ -d "$path" ]; then
+            # restore the mtime for each files which fs mtime later then $ts_before in $sub_files
+            sub_files=$(preview_fs_mtime "HEAD" "$path")
+            [ -n "$sub_files" ] && while IFS="$ETX" read -r file file_ts
                 do
-                    ! [ -e "$REPO_ROOT/$file" ] && echo "file not exists $file" && continue
+                    [ "$file_ts" -lt "$cmd_ts" ] && continue
+                    ! restore_file_from_source "$file" "$source" && return 1
+                done <<EOF
+$sub_files
+EOF
+        else
+            file_ts=$(get_file_mtime "$path")
+            [ "$file_ts" -lt "$cmd_ts" ] && echo "$file_ts < $cmd_ts" && continue
 
-                    [ -n "$status_files" ] && echo "$status_files" | grep -Fxq "$file" && echo "skip $file" && continue
+            ! restore_file_from_source "$SUB_DIR$path" "$source" && return 1
+        fi
+    done << EOF
+$files
+EOF
+    return 0
+}
 
-                    if [ -z "$note_ts" ]; then
-                        log "no note, use commit date, '$file'"
-                        note_ts="$last_commit_ts"
-                    fi
+post_checkout_files()
+{
+    modified_before=$1
+    ts_checkout="$2"
+    source="$3"
 
-                    if [ -z "$file_ts" ] || [ -z "$note_ts" ]; then
-                        echo "Invalid file or note timestamp: '$file_ts','$note_ts','$file'"
-                        continue
-                    fi
+    #select the staged and not modifying files
+    get_status_files | grep '^[AM]  ' | cut -c 4- |
+        while IFS="$ETX" read -r rpath
+        do
+            file_ts=$(get_file_mtime "$REPO_ROOT/$rpath")
+            if [ "$file_ts" -le "$ts_checkout" ]; then
+                log "restore: $path"
+                ! checkout_mtime_from_source "$rpath" "$source" && return 1
+            else
+                log "keep mtime: $rpath, $file_ts"
+            fi
+        done
 
-                    if [ "$file_ts" -lt "$note_ts" ]; then
-                        echo "Conflicting mtime $(format_timestamp "$note_ts") with local $(format_timestamp "$file_ts")  $file"
-                        continue
-                    fi
-
-                    ! set_file_mtime "$REPO_ROOT/$file" "$note_ts" && return 1
-
-                    fast_format_timestamp "$note_ts"
-                    log "synchronize: $TM_RET $file, $note_ts, $file_ts"
-
-                done
+    ! refresh_stage_note "$modified_before" && return 1
 
     return 0
 }
@@ -2546,54 +2592,6 @@ post_push ()
     ! origin_git push \
                 origin \
                 "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" && return 1 || return 0
-}
-
-
-refresh_later_full_notes()
-{
-    commit_id="$1"
-
-    if [ ! -e "$GIT_DIR/kmt/" ]; then
-        return 0
-    fi
-
-    delta_note=$(note_show "$commit_id")
-
-    log "update all exists full note with commit note, $commit_id"
-
-    full_note_files=$(find "$GIT_DIR"/kmt/*.full.note)
-
-    [ -n "$full_note_files" ] && while IFS= read -r file
-    do
-        if ! grep -m 1 -F "$ETX$commit_id$ETX" "$file"; then
-#            log "skip $file"
-            continue
-        fi
-
-        echo "$delta_note" | LC_ALL=C join -t "$ETX" -a1 -o 1.1,1.2,1.3,1.4,2.1,2.2 "$file" - |
-            awk -F"$ETX" -v OFS="$ETX" -v ci="$commit_id" '
-            {
-                if($3 == ci){
-                    print $1,$6,$3,$4
-                }
-                else{
-                    print $1,$2,$3,$4
-                }
-            }
-            ' > "$file.new.$$"
-
-        full_note_file_ts=$(get_file_mtime "$file")
-        ! set_file_mtime "$file.new.$$" "$full_note_file_ts" && return 1
-
-        ! mv "$file.new.$$" "$file" && return 1
-
-        log "update full note ok: $file"
-
-    done << EOF
-$full_note_files
-EOF
-
-    return 0
 }
 
 post_fetch()
@@ -2647,34 +2645,6 @@ post_pull()
     fi
 
     return 0
-}
-
-get_current_head()
-{
-    git_rev_parse HEAD
-    ret=$?
-    if [ "$ret" != 0 ]; then
-        commits_count=$(origin_git log --pretty=format:"%H,%ct" 2> /dev/null | grep -c "") && [ "$commits_count" -eq "0" ] && return 0
-    fi
-
-    return $ret
-}
-
-get_prev_commit()
-{
-    commit=${1:-HEAD}
-    git_rev_parse "$commit~1"
-    ret=$?
-    if [ "$ret" != 0 ]; then
-        commits_count=$(origin_git log --pretty=format:"%H,%ct" "$commit" 2>/dev/null | grep -c "") && [ "$commits_count" -eq "1" ] && return 0
-    fi
-
-    return $ret
-}
-
-current_branch()
-{
-    origin_git branch --show-current
 }
 
 # ---------------------------------------------------------------------------
@@ -2755,8 +2725,8 @@ git_command_handler()
                 files=$(select_args "restore" "$@")
             fi
 
-            log "source: $source, files: $files"
             if [ -n "$files" ]; then
+                log "restore $files from source: '$source'"
                 ! post_restore_files "$files" "$ts_before" "$source" && return 1
             fi
             ;;
@@ -2815,45 +2785,6 @@ git_command_handler()
     esac
 
     return 0
-}
-
-# ---------------------------------------------------------------------------
-# Maintenance / inspection commands
-# ---------------------------------------------------------------------------
-
-show_commit_note()
-{
-    ! commit=$(git_rev_parse "${1:-HEAD}") && echo "get commit-id failed $1" && return 1
-
-    ! note_show "$commit" &&  return 1
-
-    return 0
-}
-
-show_history()
-{
-    path=$1
-    commit=${2:-HEAD}
-
-    [ -z "$path" ] && echo "history requires a file path" && return 1
-
-    # if you want to track the rename history, add --follow and --name-staus to git log
-    # read out the origin name when renamed, use origin name to show history mtimes
-    # THIS has not implemented yet.
-
-    ! prev_commits=$(origin_git log --format='%H,%cI' "$commit" -- "$path") && return 1
-
-    [ -z "$prev_commits" ] && echo "no history" && return 0
-
-    echo "$prev_commits" |
-        while IFS="," read -r commit date; do
-            note_ts=$(note_get_mtime "$SUB_DIR$path" "$commit")
-            if [ -n "$note_ts" ]; then
-                printf '%s | %s | %s | %s\n' "$commit" "$date" "$note_ts" "$(format_timestamp "$note_ts")"
-            else
-                printf '%s | %s | %10s | %s\n' "$commit" "$date" "$note_ts" "$(format_timestamp "")"
-            fi
-        done
 }
 
 # ---------------------------------------------------------------------------
@@ -2979,7 +2910,7 @@ EOF
                     echo "$str"
                 ;;
             4)
-                preview_fs_note "$commit" | show_note ||
+                preview_fs_mtime "$commit" | show_note ||
                     echo "FAILED"
                 ;;
 
@@ -3066,7 +2997,6 @@ app_is_update_to_date()
     return 0
 }
 
-
 app_get_files_2_commit()
 {
     #select diff to stage files
@@ -3085,20 +3015,6 @@ app_get_remote_url()
     origin_git remote -v | grep -m 1 -oE 'http[s]?://[^/]*'
 }
 
-rebuild_full_note()
-{
-    commit="${1:-HEAD}"
-    full_note_file=$(get_note_file "$commit" "full")
-
-    ! ( prebuild_full_note "$commit" > "$full_note_file.temp.$$" ) && return 1
-
-    ! mv "$full_note_file.temp.$$" "$full_note_file" && return 1
-
-    ! set_file_mtime "$full_note_file" "$(get_commit_time "$commit")" && return 1
-
-    return 0
-}
-
 app_kmt_list()
 {
     ! commit=$(get_current_head) && return 1
@@ -3111,7 +3027,7 @@ app_kmt_list()
     while IFS= read -r dir
         do
             log "scan dir: $dir"
-            ! preview_fs_note "$commit" "$dir" |
+            ! preview_fs_mtime "$commit" "$dir" |
                 LC_ALL=C sort |
                 LC_ALL=C join -t "$ETX" -a1 -e '' -o 1.1,1.2,2.2,2.4 - "$full_note_file" | sed "s/^$STX//" && return 1
         done << EOF
@@ -3131,7 +3047,7 @@ app_save_file_mtime()
 
     [ -z "$file_ts" ] && return 1
 
-    if ! commit=$(last_commit_for_file "$file"); then
+    if ! commit=$(last_commit_of_file "$file"); then
         echo "$commit"
         echo "get commit failed '$file'" && return 1
     fi
@@ -3165,6 +3081,5 @@ app_on_kmt_resolved()
 {
     return 0
 }
-
 
 main "$@"
