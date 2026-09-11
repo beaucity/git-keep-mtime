@@ -2235,7 +2235,7 @@ refresh_later_full_notes()
             }
             ' > "$file.new.$$"
 
-        full_note_file_ts=$(get_file_mtime "$file")
+        full_note_file_ts=$(get_file_mtime "$file") || return 1
         ! set_file_mtime "$file.new.$$" "$full_note_file_ts" && return 1
 
         ! mv "$file.new.$$" "$file" && return 1
@@ -2544,15 +2544,16 @@ post_restore_files()
         if [ -d "$path" ]; then
             # restore the mtime for each files which fs mtime later then $ts_before in $sub_files
             sub_files=$(preview_fs_mtime "HEAD" "$path")
-            [ -n "$sub_files" ] && while IFS="$ETX" read -r file file_ts
+            [ -n "$sub_files" ] && while IFS="$ETX" read -r rfile file_ts
                 do
                     [ "$file_ts" -lt "$cmd_ts" ] && continue
-                    ! restore_file_from_source "$file" "$source" && return 1
+                    ! restore_file_from_source "$rfile" "$source" && return 1
                 done <<EOF
 $sub_files
 EOF
         else
-            file_ts=$(get_file_mtime "$path")
+            ! file_ts=$(get_file_mtime "$path") && return 1
+
             [ "$file_ts" -lt "$cmd_ts" ] && echo "$file_ts < $cmd_ts" && continue
 
             ! restore_file_from_source "$SUB_DIR$path" "$source" && return 1
@@ -2573,7 +2574,7 @@ post_checkout_files()
     get_status_files | grep '^[AM]  ' | cut -c 4- |
         while IFS="$ETX" read -r rpath
         do
-            file_ts=$(get_file_mtime "$REPO_ROOT/$rpath")
+            ! file_ts=$(get_file_mtime "$REPO_ROOT/$rpath") && return 1
             if [ "$file_ts" -le "$ts_checkout" ]; then
                 log "restore: $path"
                 ! checkout_mtime_from_source "$rpath" "$source" && return 1
