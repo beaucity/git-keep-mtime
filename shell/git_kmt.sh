@@ -2483,15 +2483,12 @@ on_head_moved()
                 ' |
                 while IFS="$ETX" read -r file file_ts note_ts last_commit_ts
                 do
-                    log "synchronize $file ..."
+#                    log "synchronize $file ..."
 
                     if ! escaped_file_exists "$REPO_ROOT/$file"; then
                         log "file not exists $file"
                         continue
                     fi
-#                    ! [ -e "$REPO_ROOT/$file" ] && echo "file not exists $file" && continue
-
-                    log "2"
 
                     [ -n "$status_files" ] && printf "%s\n" "$status_files" | grep -Fxq "$file" && log "skip $file" && continue
 
@@ -2515,9 +2512,8 @@ on_head_moved()
                         return 1
                     fi
 
-#                    ! set_file_mtime "$real_path" "$note_ts" && return 1
-                    fast_format_timestamp "$note_ts"
-                    log "synchronize ok: $TM_RET $file, $note_ts, $file_ts"
+#                    fast_format_timestamp "$note_ts"
+#                    log "synchronize ok: $TM_RET $file, $note_ts, $file_ts"
                 done
 }
 
