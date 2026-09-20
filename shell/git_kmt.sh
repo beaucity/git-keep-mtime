@@ -17,7 +17,7 @@
 #      are not handled by KMT to that executable.
 #
 #  Version:
-#      0.1.8
+#      0.2.4
 #
 #  Storage model:
 #      git notes --ref=kmt/mtime <commit>
@@ -30,7 +30,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.1.8'
+KMT_VERSION='0.2.4'
 
 META_NAME="mtime-notes"
 
@@ -41,7 +41,7 @@ ETX=$(printf '\x03')
 EOT=$(printf '\x04')
 
 
-CUR_DIR=$(realpath)
+CUR_DIR=$(pwd -P)
 REPO_ROOT=
 GIT_DIR=
 SUB_DIR=
@@ -61,6 +61,7 @@ LF="
 "
 
 KMT_DEBUG_LOG_FILE=
+ENABLE_OID_VERIFY=0
 
 TZ_SECONDS=
 
@@ -71,7 +72,7 @@ log()
 {
     log_ret=$?
 
-    [ -z "$KMT_DEBUG_LOG_FILE" ] && return $log_ret
+    [ -z "$KMT_DEBUG_LOG_FILE" ] && return 0
 
     [ "$logging" = "1" ] && return $log_ret
 
@@ -120,7 +121,9 @@ full_path_name()
 {
     dir=${1:-.}
 
-    str="$(cd "$(dirname "$dir")" && realpath)/$(basename "$dir")" || return 1
+    str="$(realpath "$(dirname "$dir")")/$(basename "$dir")"
+
+#    str="$(cd "$(dirname "$dir")" && realpath)/$(basename "$dir")" || return 1
 
     printf "%s\n" "$str"
 
@@ -314,15 +317,20 @@ is_timestamp()
 format_timestamp()
 {
     fast_format_timestamp "$@"
-    echo "$TM_RET"
+    echo "$FORMAT_RESULT"
 }
 
 fast_format_timestamp() {
+    FORMAT_RESULT=
     ts=$1
-    TM_RET=
     [ -z "$1" ] && return 1
-    [ -z "$TZ_SECONDS" ] && detect_time_zone
-    ts=$(($1 + ${2:-"$TZ_SECONDS"}))
+
+    tz=$2
+    [ -z "$tz" ] && tz="$TZ_SECONDS"
+    ts=$(($1 + tz))
+
+    mode=$3
+
     days=$((ts / 86400))
     sod=$((ts % 86400))
 
@@ -369,7 +377,8 @@ fast_format_timestamp() {
     [ $minute -lt 10 ] && minute="0$minute"
     [ $second -lt 10 ] && second="0$second"
 
-    TM_RET="${year}-${month}-${day} ${hour}:${minute}:${second}"
+    [ "$mode" = "1" ] && FORMAT_RESULT="${year}${month}${day}${hour}${minute}.${second}" ||
+    FORMAT_RESULT="${year}-${month}-${day} ${hour}:${minute}:${second}"
 }
 
 format_timestamp_old() {
@@ -461,7 +470,9 @@ set_file_mtime()
             ;;
 
         macos)
-            touch -m -t "$(date -r "$timestamp" "+%Y%m%d%H%M.%S")" "$file_to_set" || return 1
+            fast_format_timestamp "$timestamp" "" "1"
+#            touch -m -t "$(date -r "$timestamp" "+%Y%m%d%H%M.%S")" "$file_to_set" || return 1
+            touch -m -t "$FORMAT_RESULT" "$file_to_set" || return 1
             ;;
 
         *)
@@ -487,6 +498,68 @@ get_timestamp()
             date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$dt" +%s
             ;;
     esac
+}
+
+python_touch()
+{
+    cmd=$(find_command "python3") || cmd=$(find_command "python")
+
+    "$cmd" -c '
+import os, sys
+buf = getattr(sys.stdin, "buffer", sys.stdin)
+e = 0
+for line in buf:
+    if isinstance(line, bytes):
+        line = line.rstrip(b"\n").rstrip(b"\r")
+        etx = b"\x03"
+    else:
+        line = line.rstrip("\n").rstrip("\r")
+        etx = "\x03"
+    if not line:
+        continue
+    name, sep, ts = line.partition(etx)
+
+    if not sep:
+        sys.stderr.write("skip: %r\n" % (line,))
+        e += 1
+        continue
+    try:
+        p = name if isinstance(name, str) else os.fsdecode(name)
+        p=p.replace("\x0E", "\n")
+        os.utime(p, (int(ts), int(ts)))
+    except Exception as x:
+        sys.stderr.write("%r: %s\n" % (name, x))
+        e += 1
+sys.exit(1 if e else 0)
+'
+}
+
+pre_batch_touch()
+{
+    while IFS="$ETX" read -r fn ts _
+    do
+        if [ "$PLATFORM" = 'linux' ]; then
+            printf "%s\0" "$ts"
+            printf "%s\0" "$fn"
+        else
+            fast_format_timestamp "$ts" "" "1"
+            printf "%s\0" "$FORMAT_RESULT"
+            printf "%s\0" "$fn"
+        fi
+    done
+}
+
+batch_touch()
+{
+    if [ "$SCAN_BACKEND" = 'python' ]; then
+        python_touch
+    else
+        if [ "$PLATFORM" = 'linux' ]; then
+            pre_batch_touch | xargs -0 -P 4 -n 2 sh -c 'touch -m -d "@$1" "$2"'
+        else
+            pre_batch_touch | xargs -0 -P 4 -n 2 touch -m -t
+        fi
+    fi
 }
 
 grep_arg()
@@ -551,6 +624,8 @@ skip_opt_args_from()
         esac
     done
 
+    [ "$start" = 1 ] && return 0
+
     return 1
 }
 
@@ -611,6 +686,36 @@ select_arg()
     _select_from_args 1 0 "$key" "$@"
 }
 
+select_any()
+{
+    keys="$1"
+    shift
+
+    for p in $keys
+    do
+        select_arg "$p" && return 0
+    done
+    return 1
+}
+
+print_n()
+{
+    [ -n "$1" ] && printf "%s\n" "$1"
+}
+
+select_arg_pos()
+{
+    key=$1
+    shift
+    pos=0
+    for p in "$@";
+    do
+        [ "$p" = "$key" ] && echo "$pos" && return 0
+        pos=$(( pos+1 ))
+    done
+    return 1
+}
+
 select_args()
 {
     key=$1
@@ -665,6 +770,40 @@ select_dirs()
     return 0
 }
 
+insert_after() {
+    _pos=$1
+    _count=$2
+    shift 2
+
+    _news=
+    _k=0
+    while [ "$_k" -lt "$_count" ]; do
+        _e=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+        _news="$_news '$_e'"
+        shift
+        _k=$((_k + 1))
+    done
+
+    _out=
+    _i=1
+    _done=0
+    for _a in "$@"; do
+        _e=$(printf '%s' "$_a" | sed "s/'/'\\\\''/g")
+        _out="$_out '$_e'"
+        if [ "$_i" -eq "$_pos" ] && [ "$_done" -eq 0 ]; then
+            _out="$_out$_news"
+            _done=1
+        fi
+        _i=$((_i + 1))
+    done
+
+    if [ "$_done" -eq 0 ]; then
+        _out="$_out$_news"
+    fi
+
+    printf 'set --%s\n' "$_out"
+}
+
 
 ORIGIN_APP=
 
@@ -693,10 +832,12 @@ kmt_is_installed()
         [ "$(readlink "$app_entry_path")" = "$kmt_path" ] &&
         [ -x "$kmt_path" ] &&
 
-        [ -L "$orig_caller_path" ] &&
-        [ -x "$orig_caller_path" ] &&
-        [ "$(basename "$(readlink "$orig_caller_path")")" = "$APP" ]; then
-            return 0
+        [ -x "$orig_caller_path" ]; then
+            if [ -L "$orig_caller_path" ]; then
+                [ "$(basename "$(readlink "$orig_caller_path")")" = "$APP" ] && return 0
+            else
+                return 0
+            fi
     fi
 
     return 1
@@ -796,7 +937,7 @@ check_executable_when_moved()
 
     [ -e "$kmt_sub_dir" ] && echo "$kmt_sub_dir already exists." && return 1
 
-    ! mkdir -p "$kmt_sub_dir" && ehco "mkdir $kmt_sub_dir failed." && return 1
+    ! mkdir -p "$kmt_sub_dir" && echo "mkdir $kmt_sub_dir failed." && return 1
 
     ! mv "$orig_app_path" "$mv_to" && return 1
 
@@ -825,7 +966,7 @@ kmt_install()
         concealed_method='move'
     else
         install_dir=$(find_install_dir "$original_dir") || {
-            error "cannot find a writable PATH directory before original git"
+            log "cannot find a writable PATH directory before original git"
             return 1
         }
         concealed_method='cover'
@@ -945,7 +1086,7 @@ kmt_uninstall()
             ! rm -f "$orig_caller_path" && echo "Remove $orig_app_path failed." && return 1
             echo "Removed $orig_caller_path successfully."
         else
-            error "orig_restore_path is empty but $orig_caller_path is not a symlink"
+            echo "orig_restore_path is empty but $orig_caller_path is not a symlink"
             return 1
         fi
     fi
@@ -1008,18 +1149,26 @@ auto_set_kmt_scan_backend()
     return 0
 }
 
-detect_debug_log()
+detect_conf()
 {
-    [ -n "$KMT_DEBUG_LOG_FILE" ] && return 0
-
     if ! app_entry_path=$(find_command "$APP"); then
         echo "Original $APP executable not found."
         return 1
     fi
 
-    kmt_debug_log="$(dirname "$app_entry_path")/kmt-debug-log"
+    app_kmt_conf="$(dirname "$app_entry_path")/$APP_KMT.conf"
 
-    [ -f "$kmt_debug_log" ] && KMT_DEBUG_LOG_FILE=$(cat < "$kmt_debug_log")
+    find_in_conf()
+    {
+        key="$1"
+        file="$2"
+        grep -o "^${key}:\s*.*" "$file" | sed "s/${key}: *//"
+    }
+
+    if [ -f "$app_kmt_conf" ]; then
+        [ -z "$KMT_DEBUG_LOG_FILE" ] && KMT_DEBUG_LOG_FILE=$(find_in_conf "kmt_debug_log" "$app_kmt_conf")
+        ENABLE_OID_VERIFY=$(find_in_conf "enable_oid_verify" "$app_kmt_conf")
+    fi
 
     return 0
 }
@@ -1117,7 +1266,7 @@ on_file_scan()
     if [ -n "$prop_ts" ]; then
         if [ "$file_ts" = "$prop_ts" ] || [ -d "$file" ]; then
             fast_format_timestamp "$file_ts"
-            [ "$cmd" = "show_completed" ] && echo "Completed $TM_RET $file"
+            [ "$cmd" = "show_completed" ] && echo "Completed $FORMAT_RESULT $file"
             completed_count=$(( completed_count+1 ))
             return 0
         fi
@@ -1274,6 +1423,8 @@ kmt_foreach_file()
                 if [ -e "$file" ]; then
                     echo "Uncommitted changes detected: $file"
                     has_uncommitted=1
+                else
+                    log "Not exists: $file"
                 fi
             done << EOF
         $str
@@ -1297,10 +1448,10 @@ EOF
     now_ts=$(date +%s)
     [ -n "$str" ] && while IFS="$SEP" read -r file file_ts prop_ts last_cts l2nd_cts
     do
-        log "on file: $file"
+#        log "on file: $file"
         decode_from_inline "$file"
         defile="$DECODE_RESULT"
-        log "real file: $defile"
+#        log "real file: $defile"
         ! on_file_scan "$defile" "$file_ts" "$prop_ts" "$last_cts" "$l2nd_cts" && return 1
     done << EOF
 $str
@@ -1585,7 +1736,8 @@ main()
     ! detect_platform ||
     ! detect_time_zone ||
     ! detect_original_app ||
-    ! detect_debug_log && return 1
+    ! detect_conf ||
+    ! auto_set_kmt_scan_backend && return 1
 
     dispatch "$@"
 #    log "ret: $?"
@@ -1660,10 +1812,16 @@ git_last_commit_of_file()
 git_status_files()
 {
 #    origin_git status --short -z "$@" | tr '\0' '\n'
-    origin_git status --short -z "$@" | pipe_inline_encode | tr '\0' '\n'
+    origin_git status --short --untracked-files=no -z | pipe_inline_encode | tr '\0' '\n'
 }
 
-git_diff_status_files()
+#git_diff_staged_files()
+#{
+##    origin_git status --short -z "$@" | tr '\0' '\n'
+#    origin_git diff --name-status --staged -z "$@" | pipe_inline_encode | tr '\0' '\n'
+#}
+
+git_diff_commit_files()
 {
     commit=${1:-HEAD}
 
@@ -1682,7 +1840,7 @@ preview_fs_mtime()
 
     origin_git ls-tree -r --full-tree --name-only "$commit" -z -- "$path" |
         batch_stat_ex |
-        index_encode
+        index_encode_inline
 }
 
 # Output: <STX>path<ETX>commit<ETX>commit_ts
@@ -1696,7 +1854,7 @@ git_last_commit_of_files()
         tr '\0' "$EOT" |
         awk -F, -v RS="$EOT" -v OFS="$ETX" -v stx="$STX" -v elf="$ELF" '
             BEGIN {commit=""}
-            /^[0-9a-f]{40},[0-9]+/ {
+            /^[0-9a-f]{40,},[0-9]+/ {
                 split($0, arr, "\n")
                 if(arr[2]!=""){
                     split(arr[1], arr2, ",")
@@ -1749,7 +1907,7 @@ git_last_2_commits_of_files()
         tr '\0' "$EOT" |
         awk -F, -v RS="$EOT" -v OFS="$ETX" -v stx="$STX" -v elf="$ELF" '
             BEGIN {commit=""}
-            /^[0-9a-f]{40},[0-9]+/ {
+            /^[0-9a-f]{40,},[0-9]+/ {
                 split($0, arr, "\n")
                 if(arr[2]!=""){
                     split(arr[1], arr2, ",")
@@ -1822,9 +1980,9 @@ git_last_2_commits_of_files()
 # Note helpers
 # ---------------------------------------------------------------------------
 
-# git_add_note <commit> <file>
+# git_note_add <commit> <file>
 #   Replace the entire note of <commit> with the contents of <file>.
-git_add_note()
+git_note_add()
 {
     origin_git notes --ref="$NOTE_REF" add -f -F "$2" "$1"
 }
@@ -1834,6 +1992,21 @@ git_add_note()
 git_note_show()
 {
     origin_git notes --ref="$NOTE_REF" show "$1" 2>/dev/null
+}
+
+git_note_not_exists()
+{
+    git_note_oid "$1" && [ $? = 1 ]
+}
+
+git_note_copy()
+{
+    origin_git notes --ref="$NOTE_REF" copy "$1" "$2"
+}
+
+git_note_oid()
+{
+    origin_git notes --ref="$NOTE_REF" list "$1"
 }
 
 # Look up the mtime of a file from a specific commit's note.
@@ -1893,23 +2066,18 @@ pipe_inline_encode()
     tr '\n' "$ELF"
 }
 
-index_encode()
+index_encode_inline()
 {
-    awk -v elf="$ELF" -v etx="$ETX" '
-        NF {
-            printf "%s%s", $0, (index($0, etx) > 0)?"\n":elf
-        }
-        '
+    awk -v elf="$ELF" -v etx="$ETX" 'NF{printf "%s%s", $0, (index($0, etx) > 0)?"\n":elf}'
 }
 
-index_encode_filename()
+index_file_encode_inline()
 {
     file="$1"
-    cat < "$file" | index_encode > "$file.$$"
+    ! cat < "$file" | index_encode_inline > "$file.$$" && return 1
 
     ts=$(get_file_mtime "$file")
     set_file_mtime "$file.$$" "$ts" || return 1
-
     mv -f "$file.$$" "$file" || return 1
 
     return 0
@@ -1968,10 +2136,18 @@ index_is_valid()
 {
     case "$1" in
         delta|stage)
-            ! grep -Ev '^\x2.*\x3(D|[1-9][0-9]*)$' "$2"
+            if [ -z "$2" ]; then
+                ! grep -Ev "^${STX}.*${ETX}(D|[1-9][0-9]*)$"
+            else
+                ! grep -Ev "^${STX}.*${ETX}(D|[1-9][0-9]*)$" "$2"
+            fi
             ;;
         full)
-            ! grep -Ev '^\x2.*\x3[0-9]*\x3[0-9a-f]{40}\x3[0-9]+\x3[0-9]*$' "$2"
+            if [ -z "$2" ]; then
+                ! grep -Ev "^${STX}.*${ETX}[0-9]*${ETX}[0-9a-f]{40,}${ETX}[0-9]+${ETX}[0-9]*$"
+            else
+                ! grep -Ev "^${STX}.*${ETX}[0-9]*${ETX}[0-9a-f]{40,}${ETX}[0-9]+${ETX}[0-9]*$" "$2"
+            fi
             ;;
     esac
 }
@@ -1984,10 +2160,10 @@ refresh_stage_note()
     # the mtimes of them should be refreshed by stat(ed) values
     newly_added_files=
     if [ -n "$modified_before" ]; then
-        newly_added_files=$(git_status_files | grep '^[^ ]  ' | cut -c 4- |
+        newly_added_files=$(git_status_files | grep '^[^ ] ' | cut -c 4- |
             while read -r staged_file
             do
-                printf "%s\n" "$modified_before" | grep -Fx "$staged_file"
+                print_n "$modified_before" | grep -Fx "$staged_file"
             done)
         log "newly_added_files: $newly_added_files"
     fi
@@ -2000,26 +2176,26 @@ refresh_stage_note()
 
     [ -f "$stage_file_temp" ] && rm -f "$stage_file_temp"
 
-    if ! git_status_files | grep '^[AMD]. ' |
+    if ! git_status_files | grep '^[AMD].' |
         while IFS= read -r line
         do
-            staged_flag=$(printf "%s\n" "$line"| cut -c 1-1)
+            staged_flag=$(print_n "$line"| cut -c 1-1)
 #            file=$(echo "$line"| cut -c 4-)
-            file=$(printf "%s\n" "$line" | cut -c 4- )
+            file=$(print_n "$line" | cut -c 4- )
 
             case "$staged_flag" in
                 D)
                     log "DELETE: $line"
-                    printf "%s\n" "$STX$file${ETX}D" >> "$stage_file_temp"
+                    print_n "$STX$file${ETX}D" >> "$stage_file_temp"
                     ;;
                 *)
                     if [ -f "$stage_file" ] && staged_ts=$(index_get_file_mtime "$STX$file" "$stage_file"); then
-                        if [ -n "$newly_added_files" ] && printf "%s\n" "$newly_added_files" | grep -Fxq "$file"; then
+                        if [ -n "$newly_added_files" ] && print_n "$newly_added_files" | grep -Fxq "$file"; then
                             log "RENEW: $line"
                             printf "%s\0" "$file"
                         else
                             log "REMAIN: $line, $staged_ts"
-                            printf "%s\n" "$STX$file${ETX}$staged_ts" >> "$stage_file_temp"
+                            print_n "$STX$file${ETX}$staged_ts" >> "$stage_file_temp"
                         fi
                     else
                         log "ADD: $line"
@@ -2033,21 +2209,21 @@ refresh_stage_note()
         return 1
     fi
 
-    ! index_encode_filename "$stage_file_temp" && return 1
+    ! index_file_encode_inline "$stage_file_temp" && return 1
 
     if [ -s "$stage_file_temp" ]; then
         cat < "$stage_file_temp" | LC_ALL=C sort > "$stage_file"
 
-        ! index_is_valid "stage" "$stage_file" && echo "invalid content in stage file: $stage_file" && return 1
-
         last_ts=$(awk -F"$ETX" 'BEGIN {max = 0} $2!="D" && $2 > max {max = $2} END {print max}' "$stage_file")
 
-        set_file_mtime "$stage_file" "$last_ts"
-    else
-        [ -f "$stage_file" ] && rm -f "$stage_file"
-    fi
+        ! set_file_mtime "$stage_file" "$last_ts" && return 1
 
-    [ -f "$stage_file_temp" ] && ! rm -f "$stage_file_temp" && return 1
+        ! rm -f "$stage_file_temp" && return 1
+
+        ! index_is_valid "stage" "$stage_file" && echo "invalid content in stage file: $stage_file" && return 1
+    else
+        mv -f "$stage_file_temp" "$stage_file"
+    fi
 
     log "refresh_stage_note ok"
 
@@ -2061,53 +2237,47 @@ prebuild_commit_note()
 {
     commit=${1:-HEAD}
 
-    ! str=$(git_diff_status_files "$commit") && echo "diff-tree failed" && return 1
+    # Step 1 --- pick up the diff-files
+    ! str=$(git_diff_commit_files "$commit") && echo "diff-tree failed" && return 1
 
     if [ -z "$str" ]; then
         log "no committed diff files: $commit"
         return 0
     fi
 
-#    printf "%s\n" "$str"
-#    return 0
-
-    printf "%s\n" "$str" |
+    # Step 2 --- print out empty meta-data for the deleted or not exists diff-files
+    print_n "$str" |
         while IFS="$ETX" read -r status rfile
         do
             [ "$status" = "D" ] && printf "%s%s%sD\n" "$STX" "$rfile" "$ETX" && continue
             ! escaped_file_exists "$REPO_ROOT/$rfile" && printf "%s%s%s\n" "$STX" "$rfile" "$ETX"
         done
 
-    if ! exists_files=$(printf "%s\n" "$str" |
+    # Step 3 --- stat the mtime for exists diff-files
+    if ! exists_files=$(print_n "$str" |
               while IFS="$ETX" read -r status rfile
               do
                   [ "$status" != "D" ] && escaped_file_exists "$REPO_ROOT/$rfile" && printf "%s\0" "$rfile"
               done |
                 pipe_inline_decode |
-                batch_stat_ex |
-                index_encode
+                batch_stat_ex
               ); then
         echo "stat failed"
         return 1
     fi
 
+    # Step 4 --- print out the mtime meta-data, empty it in case newly modified diff-files
     if [ -n "$exists_files" ]; then
         ! commit_ts=$(git_commit_time "$commit") && echo "get commit time failed" && return 1
 
         #if fs-mtime greater than commit-time, means the real mtime is missing, keep it empty
-        printf "%s\n" "$exists_files" | awk -F"$ETX" -v OFS="$ETX" -v cts="$commit_ts" '{
-              if($2!="" && $2<=cts){
-                  print $1,$2
-              }
-              else{
-                  print $1,""
-              }
-          }'
+        print_n "$exists_files" | index_encode_inline | exclude_status_files "1" |
+            awk -F"$ETX" -v OFS="$ETX" -v cts="$commit_ts" '{print $1, ($2>cts)?"":$2}'
     fi
 }
 
 reverse_before_key() {
-    printf "%s\n" "$1" | awk -v k="$2" -F, '
+    print_n "$1" | awk -v k="$2" -F, '
         BEGIN{n=0}
         k!="" && $1==k {found=1; next}
         !found{a[++n]=$0}
@@ -2122,7 +2292,7 @@ index_merge_with_delta()
     commit_id=$3
     commit_ts=$4
 
-    printf "%s\n" "$delta" | LC_ALL=C join -t "$ETX" -a1 -a2 -e '' -o 1.1,1.2,1.3,1.4,1.5,2.1,2.2 "$main_note" - |
+    print_n "$delta" | LC_ALL=C join -t "$ETX" -a1 -a2 -e '' -o 1.1,1.2,1.3,1.4,1.5,2.1,2.2 "$main_note" - |
         awk -F"$ETX" -v OFS="$ETX" -v ci="$commit_id" -v ct="$commit_ts" '
         {
             if($1 != "" && $6 == ""){
@@ -2147,13 +2317,13 @@ prebuild_full_note_file_by_file()
 
     doing_commit=
     cache_file=
-    [ -n "$tbl_file_commit" ] && tbl_file_commit=$(printf "%s\n" "$tbl_file_commit" | sort -t "$ETX" -k2) && while
+    [ -n "$tbl_file_commit" ] && tbl_file_commit=$(print_n "$tbl_file_commit" | sort -t "$ETX" -k2) && while
         IFS="$ETX" read -r sfile last_commit last_commit_ts l2nd_commit_ts
         do
             [ "$STX" = "$sfile" ] && continue
 
             if [ -z "$last_commit" ]; then
-                printf "%s\n" "no commit info $sfile, $last_commit, $last_commit_ts, $l2nd_commit_ts"
+                print_n "no commit info $sfile, $last_commit, $last_commit_ts, $l2nd_commit_ts"
                 ret=1
                 break
             fi
@@ -2165,7 +2335,7 @@ prebuild_full_note_file_by_file()
                 if [ ! -f "$cache_file" ]; then
                     if ! git_note_show "$last_commit" > "$cache_file"; then
                         log "commit note not exists: $sfile, commit: $last_commit, commit_ts: $last_commit_ts, l2nd_ts: $l2nd_commit_ts"
-                        printf "%s\n" "$sfile$ETX$ETX$last_commit$ETX$last_commit_ts$ETX$l2nd_commit_ts"
+                        print_n "$sfile$ETX$ETX$last_commit$ETX$last_commit_ts$ETX$l2nd_commit_ts"
                         continue
                     fi
                 fi
@@ -2176,7 +2346,7 @@ prebuild_full_note_file_by_file()
                 log "note missing file: $sfile, commit: $last_commit, commit_ts: $last_commit_ts, l2nd_ts: $l2nd_commit_ts"
             fi
 
-            printf "%s\n" "$sfile$ETX$note_ts$ETX$last_commit$ETX$last_commit_ts$ETX$l2nd_commit_ts"
+            print_n "$sfile$ETX$note_ts$ETX$last_commit$ETX$last_commit_ts$ETX$l2nd_commit_ts"
         done <<EOF
 $tbl_file_commit
 EOF
@@ -2202,10 +2372,10 @@ prebuild_full_note_commit_by_commit()
 
     [ -n "$commits_to_merge" ] && while IFS=, read -r next_commit next_commit_ts
         do
-            log "merge $next_commit ..."
+#            log "merge $next_commit ..."
             if ! delta=$(git_note_show "$next_commit"); then
                 log "no commit note ... $next_commit"
-                delta=$(git_diff_status_files "$next_commit" |
+                delta=$(git_diff_commit_files "$next_commit" |
                     awk -F"$ETX" -v OFS="$ETX" -v stx="$STX" '{print stx $2,($1=="D")?"D":""}')
             fi
 
@@ -2215,7 +2385,7 @@ prebuild_full_note_commit_by_commit()
                 return 1
             fi
 
-            printf "%s\n" "$str" > "$full_note_merging"
+            print_n "$str" > "$full_note_merging"
 
         done << EOF
 $commits_to_merge
@@ -2259,11 +2429,11 @@ EOF
         commits_to_merge=$(reverse_before_key "$prev_commits")
     fi
 
-    commits_count=$(printf "%s\n" "$commits_to_merge"| grep -c "")
+    commits_count=$(print_n "$commits_to_merge"| grep -c "")
 
     ! all_files=$(git_last_2_commits_of_files "$commit") && echo "$all_files" && return 1
 
-    files_count=$(printf "%s\n" "$all_files"| grep -c "")
+    files_count=$(print_n "$all_files"| grep -c "")
 
     if [ "$files_count" -lt $((commits_count * 10)) ]; then
         log "prebuild by $files_count files, for $commit ..."
@@ -2291,16 +2461,16 @@ refresh_later_full_notes()
 
     log "update all exists full note with commit note, $commit_id"
 
-    full_note_files=$(find "$GIT_DIR"/kmt/*.full.idx)
-
-    [ -n "$full_note_files" ] && while IFS= read -r idx_file
+    for idx_file in "$GIT_DIR"/kmt/*.full.idx
     do
+        [ -f "$idx_file" ] || continue
+
         if ! grep -m 1 -F "$ETX$commit_id$ETX" "$idx_file"; then
 #            log "skip $file"
             continue
         fi
 
-        ! printf "%s\n" "$delta_note" | LC_ALL=C join -t "$ETX" -a1 -o 1.1,1.2,1.3,1.4,1.5,2.1,2.2 "$idx_file" - |
+        ! print_n "$delta_note" | LC_ALL=C join -t "$ETX" -a1 -o 1.1,1.2,1.3,1.4,1.5,2.1,2.2 "$idx_file" - |
             awk -F"$ETX" -v OFS="$ETX" -v ci="$commit_id" '{print $1,($3==ci)?$7:$2,$3,$4,$5}' > "$idx_file.new.$$" &&
             return 1
 
@@ -2311,9 +2481,7 @@ refresh_later_full_notes()
 
         log "update full note ok: $idx_file"
 
-    done << EOF
-$full_note_files
-EOF
+    done
 
     return 0
 }
@@ -2322,11 +2490,11 @@ rebuild_commit_note()
 {
     commit=${1:-HEAD}
 
-    if git_is_head "$commit"; then
-        ! post_commit && echo "post commit failed" && return 1
-        log "post commit ok $commit"
-        return 0
-    fi
+#    if git_is_head "$commit"; then
+#        ! post_commit && echo "post commit failed" && return 1
+#        log "post commit ok $commit"
+#        return 0
+#    fi
 
     if ! note=$(prebuild_commit_note "$commit"); then
         echo "$note"
@@ -2334,27 +2502,31 @@ rebuild_commit_note()
         return 1
     fi
 
-    [ -z "$note" ] && echo "preview result is empty $commit" && return 0
+    ! note_file=$(mktemp "${TMPDIR:-/tmp}/git-kmt-note.$$") && echo "mktemp failed" && return 1
 
-    ! note_file=$(mktemp "${TMPDIR:-/tmp}/git-kmt-diff.XXXXXX") &&
-        echo "mktemp failed" &&
-        return 1
-
-    printf "%s\n" "$note" | LC_ALL=C sort > "$note_file"
+    print_n "$note" | LC_ALL=C sort > "$note_file"
 
     ! index_is_valid "delta" "$note_file" && echo "invalid content in note file: $note_file" && return 1
 
-    if ! git_add_note "$commit" "$note_file"; then
-        echo "add note failed: $commit, $note_file"
+    if git_is_head "$commit"; then
+        ! post_commit "$note_file" && echo "post commit failed" && return 1
+
         rm -f "$note_file"
-        return 1
+
+        log "post commit ok $commit"
+    else
+        if ! git_note_add "$commit" "$note_file"; then
+            echo "add note failed: $commit, $note_file"
+            rm -f "$note_file"
+            return 1
+        fi
+
+        echo "note_add_file ok"
+
+        rm -f "$note_file"
+
+        ! refresh_later_full_notes "$commit" && echo "Failed to refresh later full notes" && return 1
     fi
-
-    rm -f "$note_file"
-
-    echo "note_add_file ok"
-
-    ! refresh_later_full_notes "$commit" && echo "Failed to refresh later full notes" && return 1
 
     echo "refresh_later_full_notes ok"
 
@@ -2369,12 +2541,9 @@ rebuild_full_index()
 
     ! str=$(prebuild_full_index "$commit") && echo "$str" && echo "prebuild full index failed" && return 1
 
-    if [ -n "$str" ]; then
-        printf "%s\n" "$str" | LC_ALL=C sort > "$full_index_file.temp.$$"
-        ! index_is_valid "full" "$full_index_file.temp.$$" && echo "invalid content in index file: $full_index_file.temp.$$" && return 1
-    else
-        toutch "$full_index_file.temp.$$"
-    fi
+    print_n "$str" | LC_ALL=C sort > "$full_index_file.temp.$$"
+
+    ! index_is_valid "full" "$full_index_file.temp.$$" && echo "invalid content in index file: $full_index_file.temp.$$" && return 1
 
     ! mv "$full_index_file.temp.$$" "$full_index_file" && return 1
 
@@ -2399,6 +2568,48 @@ index_show()
 
     cat "$note_file"
     return 0
+}
+
+verify_or_amend_commit_note()
+{
+    #the hooks may change the commit files, diff the note, amend it if invalidate
+
+    old_stage_note_file="$1"
+
+    note_str=$(prebuild_commit_note | LC_ALL=C sort)
+
+    diff=$(print_n "$note_str" | LC_ALL=C join -t "$ETX" -a1 -a2 -e '' -o 1.1,1.2,2.1,2.2 "$old_stage_note_file" - |
+                awk -F"$ETX" -v OFS="$ETX" '{
+                    # $4 is empty means the file is in working
+                    if($1=="" || $3=="" || ($2!=$4 && $4!="")){
+                        print $1, $2, $3, $4
+                    }
+                }') || return 1
+
+    [ -z "$diff" ] && return 0
+
+    log "diff: $diff"
+    #amend it
+
+    head_commit=$(git_current_head)
+
+    commit_note=$(index_get_file "delta" "$head_commit")
+
+    print_n "$note_str" > "$commit_note"
+
+    [ -s "$commit_note" ] && kmt_note_oid=$(origin_git hash-object "$commit_note") || kmt_note_oid=
+
+    log "amend trailer: $kmt_note_oid, commit: $head_commit"
+
+    ! origin_git commit --amend --trailer "kmt-note-oid: $kmt_note_oid" --allow-empty --no-edit && return 1
+
+    ! post_commit "$commit_note" && return 1
+
+    [ -s "$commit_note" ] && [ "$(git_note_oid "HEAD")" != "$kmt_note_oid" ] && echo "NOTE-OID Check Failed" && return 1
+
+    [ -f "$commit_note" ] && rm -f "$commit_note"
+
+    return 2
 }
 
 
@@ -2457,46 +2668,92 @@ git_repo_dir()
     origin_git rev-parse --git-dir 2>/dev/null
 }
 
+python_batch_stat()
+{
+    cmd=$(find_command "python3") || cmd=$(find_command "python")
+    $cmd -c '
+import os, sys
+inp = getattr(sys.stdin, "buffer", sys.stdin)
+out = getattr(sys.stdout, "buffer", sys.stdout)
+data = inp.read()
+STX = b"\x02" if isinstance(data, bytes) else "\x02"
+ETX = b"\x03" if isinstance(data, bytes) else "\x03"
+NUL = b"\0" if isinstance(data, bytes) else "\0"
+NL  = b"\n" if isinstance(data, bytes) else "\n"
+for n in [x for x in data.split(NUL) if x]:
+    try:
+        stt=os.stat(n)
+        mts = int(stt.st_mtime)
+        cts = int(stt.st_ctime)
+    except Exception as x:
+        sys.stderr.write("%r: %s\n" % (n, x))
+        continue
+    out.write(STX + n + ETX + (str(mts).encode() if isinstance(n, bytes) else str(mts)) + \
+                        NL)
+'
+}
+
 batch_stat_ex()
 {
     cd "$REPO_ROOT" || return 1
 
-    if [ "$PLATFORM" = 'linux' ]; then
-        xargs -0 -L 100 stat -c "$STX%n$ETX%Y"
-#        xargs -0 -L 100 bash -c 'stat_files "$1" _ {}'
+    if [ "$SCAN_BACKEND" = 'python' ]; then
+        python_batch_stat
     else
-#        xargs -0 -L 100 bash -c 'stat_files "$1" _ {}'
-        xargs -0 -L 100 stat -f "$STX%N$ETX%m"
+        if [ "$PLATFORM" = 'linux' ]; then
+            xargs -0 -L 100 stat -c "$STX%n$ETX%Y"
+        else
+            xargs -0 -L 100 stat -f "$STX%N$ETX%m"
+        fi
     fi
 }
-
-#batch_stat_ex()
-#{
-#    awk -v RS="\0" '{gsub("\\n", "\n"); printf "%s\0",$0 }' | batch_stat_ex2
-#}
 
 synchronize_file()
 {
     rpath=$1
     ts=$2
+    file_ts=$3
 
     path="$REPO_ROOT/$rpath"
 
     decode_from_inline "$path"; path="$DECODE_RESULT"
 
-    [ ! -e "$path" ] && log "Path not exists: $path" && return 1
-
-    ! file_ts=$(get_file_mtime "$path") && log "get_file_mtime failed: $path" && return 1
-
-    [ "$file_ts" = "$ts" ] && log "same time: $file_ts, $ts" && return 0
+    if [ -z "$file_ts" ]; then
+        [ ! -e "$path" ] && log "Path not exists: $path" && return 1
+        ! file_ts=$(get_file_mtime "$path") && log "get_file_mtime failed: $path" && return 1
+        [ "$file_ts" = "$ts" ] && log "same time: $file_ts, $ts" && return 0
+    fi
 
     ! set_file_mtime "$path" "$ts" && log "failed to synchronize mtime '$path'" && return 1
 
     fast_format_timestamp "$ts"
-
-    log "Synchronized mtime ok $TM_RET, '$rpath', $ts"
+    log "Synchronized mtime ok $FORMAT_RESULT, '$rpath', $ts"
 
     return 0
+}
+
+exclude_status_files()
+{
+    empty_it="$1"
+
+    tmp_file="${TMPDIR:-/tmp}/kmt_status_files.$$"
+
+    # minus=$(sort a b | uniq)
+    git_status_files | cut -c 4- | sed "s/^/$STX/" | index_encode_inline | LC_ALL=C sort > "$tmp_file"
+
+#    log "status-files: $(cat "$tmp_file")"
+
+    LC_ALL=C join -t "$ETX" -a1 -e '' -o 1.1,1.2,2.1 - "$tmp_file" |
+                awk -F"$ETX" -v OFS="$ETX" -v ept_id="$empty_it" '{
+                    if($3==""){
+                        print $1, $2
+                    }
+                    else if (ept_id=="1"){
+                        print $1, ""
+                    }
+                }'
+
+    rm -f "$tmp_file"
 }
 
 on_head_moved()
@@ -2504,10 +2761,6 @@ on_head_moved()
     ! refresh_stage_note && echo "refresh stage failed" && return 1
 
     cd "$REPO_ROOT" && init_path || return 1
-
-    # the un-committed(modified and staged) files should exclude from restore list
-    # minus=$(sort a b | uniq)
-    status_files=$(git_status_files --untracked-files=no | cut -c 4-)
 
     ! cur_commit=$(git_current_head) && return 1
     full_note=$(index_get_file "$cur_commit" "full")
@@ -2517,51 +2770,31 @@ on_head_moved()
     fi
 
     log "restore mtimes from full note $full_note"
+    # the un-committed(modified and staged) files should exclude from restore list
 
-    preview_fs_mtime "HEAD" |
-        LC_ALL=C sort |
-            LC_ALL=C join -t "$ETX" -e '' -o 1.1,2.2,1.2,1.4 "$full_note" - |
+#    ! index_is_valid "full" "$full_note" && echo "invalid full note" && return 1
+#
+#    ! str=$(preview_fs_mtime "HEAD") && return 1
+#
+#    ! printf "%s\n" "$str" | index_is_valid "stage"  && echo "invalid stage note" && return 1
+
+    ! preview_fs_mtime "HEAD" | LC_ALL=C sort | exclude_status_files "" |
+            LC_ALL=C join -t "$ETX" -o 1.1,2.2,1.2,1.4 "$full_note" - |
                 awk -F"$ETX" -v OFS="$ETX" '
                 {
-                    if ($2 != $3) {
-                        print substr($1,2),$2,$3,$4
+                    note_ts=$3
+                    if(note_ts==""){
+                        note_ts=$4
+                    }
+                    if ($2 > note_ts) {
+                        print substr($1,2),note_ts
                     }
                 }
-                ' |
-                while IFS="$ETX" read -r file file_ts note_ts last_commit_ts
-                do
-#                    log "synchronize $file ..."
+                ' | batch_touch && echo "restore mtimes failed" && return 1
 
-                    if ! escaped_file_exists "$REPO_ROOT/$file"; then
-                        log "file not exists $file"
-                        continue
-                    fi
+    log "restore mtimes ok"
 
-                    [ -n "$status_files" ] && printf "%s\n" "$status_files" | grep -Fxq "$file" && log "skip $file" && continue
-
-                    if [ -z "$note_ts" ]; then
-                        log "no note, use commit date, '$file'"
-                        note_ts="$last_commit_ts"
-                    fi
-
-                    if [ -z "$file_ts" ] || [ -z "$note_ts" ]; then
-                        echo "Invalid file or note timestamp: '$file_ts','$note_ts','$file'"
-                        continue
-                    fi
-
-                    if [ "$file_ts" -lt "$note_ts" ]; then
-                        echo "Conflicting mtime $(format_timestamp "$note_ts") with local $(format_timestamp "$file_ts")  $file"
-                        continue
-                    fi
-
-                    if ! synchronize_file "$file" "$note_ts"; then
-                        log "synchronize failed"
-                        return 1
-                    fi
-
-#                    fast_format_timestamp "$note_ts"
-#                    log "synchronize ok: $TM_RET $file, $note_ts, $file_ts"
-                done
+    return 0
 }
 
 checkout_mtime_from_source()
@@ -2620,7 +2853,7 @@ restore_file_from_source()
 # prev / post-hooks
 # ---------------------------------------------------------------------------
 
-prev_commit()
+pre_commit()
 {
     now_ts=$(date +%s)
     head_commit=$(git_current_head)
@@ -2642,6 +2875,44 @@ prev_commit()
     return 0
 }
 
+pre_rebase()
+{
+    REBASE_ONTO_COMMIT=
+    if select_arg "--continue"; then
+        pre_commit || return 1
+
+        stage_file=$(index_get_file "$head_commit" "stage")
+        [ -s "$stage_file" ] && kmt_note_oid=$(origin_git hash-object "$stage_file") || kmt_note_oid=
+
+        message_file=".git/rebase-merge/message"
+        [ -f "$message_file" ] || message_file=".git/rebase-apply/message"
+
+        if grep "^kmt-note-oid: " "$message_file"; then
+            sed -i "s/^kmt-note-oid: .*/kmt-note-oid: ${kmt_note_oid}/" "$message_file" > "$message_file.$$"
+            mv -f "$message_file.$$" "$message_file" || return 1
+        else
+            [ "$ENABLE_OID_VERIFY" = 1 ] && echo "kmt-note-oid: ${kmt_note_oid}" >> "$message_file"
+        fi
+
+        REBASE_ONTO_COMMIT=$(cat .git/rebase-merge/onto) ||
+            REBASE_ONTO_COMMIT=$(cat .git/rebase-apply/onto)
+
+    elif select_any "--skip --abort --quit --edit-todo --show-current-patch" "$@"; then
+        REBASE_ONTO_COMMIT=$(cat .git/rebase-merge/onto) ||
+            REBASE_ONTO_COMMIT=$(cat .git/rebase-apply/onto)
+    else
+        rebase_onto=$(skip_opt_args_from "rebase" "m" "$@") || return 1
+
+        [ -z "$rebase_onto" ] && rebase_onto=$(select_arg "--onto" "$@")
+
+        REBASE_ONTO_COMMIT="$rebase_onto"
+
+        git_current_head > "$(index_get_file "rebase_orig_head" "last")"
+    fi
+
+    return 0
+}
+
 post_clone()
 {
     ! upstream_url=$(grep_arg '[^ ]+\.git$' "$@") && echo "unknown url" && return 0
@@ -2649,7 +2920,7 @@ post_clone()
 
     repo_dir=$(select_arg "$upstream_url" "$@")
     if [ -z "$repo_dir" ] ; then
-        repo_dir=$(printf "%s\n" "$upstream_url" | grep -Eo '(:|/).*\.git$' | cut -c 2- | sed 's/.git$//')
+        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/).*\.git$' | cut -c 2- | sed 's/.git$//')
     fi
     log "repo: $repo_dir"
 
@@ -2665,59 +2936,37 @@ post_clone()
     return 0
 }
 
-complete_head_note()
-{
-    ! pre_commit=$(git_prev_commit "HEAD") && return 1
-
-    pre_stage_file=$(index_get_file "$pre_commit" "stage")
-
-    if ! [ -f "$pre_stage_file" ]; then
-
-        #check if the head commit has modified, the mtime may changed invalid
-        status_files=$(git_status_files --untracked-files=no | cut -c 4-)
-        [ -n "$status_files" ] && echo "The head commit has been modified" && return 1
-
-        #stage file missing, find completable files if mtime is valid
-        ! note=$(prebuild_commit_note "HEAD") && echo "$note" && return 1
-
-#        [ -z "$note" ] && echo "completable note is empty of HEAD" && return 1
-
-        if [ -n "$note" ]; then
-            printf "%s\n" "$note" | LC_ALL=C sort > "$pre_stage_file"
-            ! index_is_valid "delta" "$pre_stage_file" && echo "invalid content in delta file: $pre_stage_file" && return 1
-        else
-            touch "$pre_stage_file"
-        fi
-    fi
-
-    if ! git_add_note "HEAD" "$pre_stage_file"; then
-        echo "add head note failed: $pre_stage_file"
-        return 1
-    fi
-
-    return 0
-}
-
 post_commit()
 {
-    ! complete_head_note && return 1
+    note_file="$1"
 
+    [ ! -f "$note_file" ] && echo "stage file missing, it should be created before commit" && return 1
     ! cur_commit=$(git_current_head) && return 1
 
-    ! pre_commit=$(git_prev_commit "HEAD") && return 1
+    if [ -s "$note_file" ]; then
+        if ! str=$(git_note_add "$cur_commit" "$note_file"); then
+            echo "add commit note failed: $note_file"
+            return 1
+        fi
+    else
+        log "empty note, $note_file"
+    fi
 
+    log "add note ok $cur_commit, $note_file"
+
+    ! cur_commit=$(git_current_head) && return 1
     ! commit_ts=$(git_commit_time "$cur_commit") && return 1
-
-    pre_stage_note_file="$(index_get_file "$pre_commit" "stage")"
-    pre_full_note=$(index_get_file "$pre_commit" "full")
     cur_full_note=$(index_get_file "$cur_commit" "full")
 
-    if [ -f "$pre_full_note" ] && [ -f "$pre_stage_note_file" ]; then
+    ! pre_commit=$(git_prev_commit) && return 1
+    pre_full_note=$(index_get_file "$pre_commit" "full")
+
+    if [ -n "$pre_commit" ] && [ -f "$pre_full_note" ] && [ -f "$note_file" ]; then
         log "merge full note for $cur_commit ..."
 
-        ! index_is_valid "stage" "$pre_stage_note_file" && echo "invalid content in stage file: $pre_stage_note_file" && return 1
+        ! index_is_valid "stage" "$note_file" && echo "invalid content in stage file: $note_file" && return 1
 
-        delta=$(cat "$pre_stage_note_file")
+        delta=$(cat "$note_file")
 
         if ! (index_merge_with_delta "$pre_full_note" "$delta" "$cur_commit" "$commit_ts") > "$cur_full_note"; then
             echo "merge full note failed"
@@ -2743,8 +2992,6 @@ post_commit()
         log "build full note for $cur_commit ok"
     fi
 
-    [ -f "$pre_stage_note_file" ] && rm -f "$pre_stage_note_file"
-
     return 0
 }
 
@@ -2753,7 +3000,7 @@ checkout_staged_file_mtimes_from_source()
     source=$1
     ts_cmd=$2
 
-    git_status_files | grep '^[AM]  ' | cut -c 4- |
+    git_status_files | grep '^[AM] ' | cut -c 4- |
         while IFS= read -r rpath
         do
             decode_from_inline "$rpath"; path="$DECODE_RESULT"
@@ -2786,24 +3033,8 @@ post_checkout_files()
 
 post_merge_failed_with_conflicts()
 {
-    source="$1"
-    ts_cmd="$2"
-    shift
-    shift
-
-    log "merge_source: $source"
-
-    ! checkout_staged_file_mtimes_from_source "$source" "$ts_cmd" && return 1
-
-    ! refresh_stage_note && return 1
-
-    return 0
-}
-
-post_merge_succeed_from_source()
-{
-    old_commit_id="$1"
-    source="$2"
+    cmd="$1"
+    old_commit_id="$2"
     ts_cmd="$3"
 
     shift
@@ -2812,16 +3043,186 @@ post_merge_succeed_from_source()
 
     ! head_commit=$(git_current_head) && return 1
 
+    if select_any "--continue" "--abort" "--quit" "$@"; then
+        log "pass"
+    else
+        if [ "$cmd" = "merge" ]; then
+            ! source=$(skip_opt_args_from "merge" "m" "$@") && echo "merge source not found" && return 1
+        elif [ "$cmd" = "revert" ]; then
+            ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert target not found" && return 1
+            source=${revert_target%%.*}~1
+        else
+            echo "Invalid command $cmd"
+            return 1
+        fi
+
+        [ -z "$source" ] && echo "No source to $cmd" && return 1
+
+        log "merge_source: $source"
+
+        ! checkout_staged_file_mtimes_from_source "$source" "$ts_cmd" && return 1
+    fi
+
+    refresh_stage_note
+}
+
+parse_range_diff()
+{
+    awk '
+    /^[[:space:]]*[0-9-]+:[[:space:]]+[0-9a-f]+[[:space:]]+[<=>!][[:space:]]+[0-9-]+:[[:space:]]+[0-9a-f]+([[:space:]]|$)/ {
+        orig=$2
+        rewritten=$5
+
+        # "-------" is not a commit id.
+        if (orig != "-------" && rewritten != "-------")
+            print orig, rewritten
+    }
+    '
+}
+
+complete_rewritten_commit()
+{
+    while read -r orig_commit rewritten_commit
+        do
+            if git_note_not_exists "$rewritten_commit"; then
+                prev_commit=$(git_prev_commit "$rewritten_commit") || return 1
+
+                prev_stage_file=$(index_get_file "$prev_commit" "stage")
+
+                if [ -f "$prev_stage_file" ]; then
+                    git_note_add "$rewritten_commit" "$prev_stage_file" || return 1
+                    rm -f "$prev_stage_file" || return 1
+                else
+                    git_note_copy "$orig_commit" "$rewritten_commit" || return 1
+                fi
+            fi
+        done
+
+    return 0
+}
+
+post_rebase_failed_with_conflicts()
+{
+    old_commit_id=$1
+    ts_cmd="$2"
+    shift
+    shift
+
+    if ! select_any "--skip --abort --quit --edit-todo --show-current-patch" "$@"; then
+        # restore file mtimes to the rebase onto commit
+        rewritten_list_file=".git/rebase-merge/rewritten-list"
+        [ -f "$rewritten_list_file" ] || rewritten_list_file=".git/rebase-apply/rewritten-list"
+
+        if [ -f "$rewritten_list_file" ]; then
+            cat < "$rewritten_list_file" | complete_rewritten_commit || return 1
+        fi
+
+        source=$(origin_git rev-parse REBASE_HEAD) || return 1
+
+        checkout_staged_file_mtimes_from_source "$source" "$ts_cmd" || return 1
+    fi
+
+    if [ "$old_commit_id" != "$(git_current_head)" ]; then
+        on_head_moved || return 1
+    fi
+
+    refresh_stage_note || return 1
+
+    return 0
+}
+
+post_rebase_succeed()
+{
+    old_commit_id=$1
+    shift
+
+    if ! select_any "--skip --abort --quit --edit-todo --show-current-patch" "$@"; then
+        # old_commit_id is not the real orig_head when --continue
+        # the ORIG_HEAD is also untrustable, it may changed when rebase --skip
+        # A better method is save the HEAD to a file when rebase started, read it out here
+
+#        orig_head=$(git_rev_parse ORIG_HEAD)
+
+        last_head_file=$(index_get_file "rebase_orig_head" "last")
+        if [ -f "$last_head_file" ]; then
+            orig_head=$(cat "$last_head_file")
+        fi
+
+        onto_commit="$REBASE_ONTO_COMMIT"
+
+        if range_diff_list=$(origin_git range-diff --no-color \
+                        "$onto_commit..$orig_head" \
+                        "$onto_commit..HEAD"
+                        ); then
+            print_n "$range_diff_list" |
+                      parse_range_diff |
+                      complete_rewritten_commit || return 1
+        else
+            log "range-diff failed"
+        fi
+    fi
+
+    if [ "$old_commit_id" != "$(git_current_head)" ]; then
+        on_head_moved || return 1
+    fi
+
+    refresh_stage_note || return 1
+
+    return 0
+
+}
+
+post_merge_succeed_from_source()
+{
+    cmd=$1
+    old_commit_id="$2"
+    ts_cmd="$3"
+
+    shift
+    shift
+    shift
+
+    source=
+    if ! { select_arg "--continue" "$@"|| select_arg "--abort" "$@" || select_arg "--quit" "$@";}; then
+        if [ "$cmd" = "merge" ]; then
+            ! source=$(skip_opt_args_from "merge" "m" "$@") && echo "merge source not found" && return 1
+        elif [ "$cmd" = "revert" ]; then
+            ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert target not found" && return 1
+            source=${revert_target%%.*}~1
+        elif [ "$cmd" = "rebase" ]; then
+            ! rebase_on=$(skip_opt_args_from "rebase" "m" "$@") && echo "rebase source not found" && return 1
+            source="$rebase_on"
+        else
+            echo "Invalid command $cmd"
+            return 1
+        fi
+        [ -z "$source" ] && echo "No source to $cmd" && return 1
+    fi
+
+    ! head_commit=$(git_current_head) && return 1
+
     if [ "$old_commit_id" = "$head_commit" ]; then
-        log "merge not complete $old_commit_id"
+        if ! { select_arg "--abort" "$@" || select_arg "--quit" "$@"; }; then
+            ! checkout_staged_file_mtimes_from_source "$source" "$ts_cmd" && return 1
+        fi
+
+        log "$cmd not complete $old_commit_id"
+
         ! refresh_stage_note && return 1
+
     else
         if select_arg "--continue" "$@"; then
-            log "merge succeeded after conflicts resolved"
-        else
-            log "merge succeeded with no conflicts"
 
-            git_diff_status_files "$head_commit" |
+            log "$cmd succeeded after conflicts resolved"
+
+            note_file="$(index_get_file "$old_commit_id" "stage")"
+
+            [ -f "$note_file" ] || note_file=
+
+        else
+            log "$cmd succeeded with no conflicts"
+
+            git_diff_commit_files "$head_commit" |
                 while IFS="$ETX" read -r status rpath
                 do
                     [ "$status" = "D" ] && continue
@@ -2838,7 +3239,35 @@ post_merge_succeed_from_source()
                 done
         fi
 
-        ! post_commit && return 1
+        if [ -z "$note_file" ]; then
+
+            note_file="$(index_get_file "$head_commit" "commit")"
+
+            ! note=$(prebuild_commit_note "$head_commit") && echo "$note" && return 1
+
+            print_n "$note" | LC_ALL=C sort > "$note_file"
+
+            if [ -s "$note" ]; then
+                ! index_is_valid "delta" "$note_file" && echo "invalid content in delta file: $note_file" && return 1
+            fi
+        fi
+
+        if [ "$ENABLE_OID_VERIFY" = 1 ]; then
+            [ -s "$note_file" ] && kmt_note_oid=$(origin_git hash-object "$note_file") || kmt_note_oid=
+
+            log "amend trailer: $kmt_note_oid, commit: $head_commit, prev-commit: $old_commit_id"
+
+            ! origin_git commit --amend --trailer "kmt-note-oid: $kmt_note_oid"  --allow-empty --no-edit && return 1
+        fi
+
+        ! post_commit "$note_file" && return 1
+
+        if [ "$ENABLE_OID_VERIFY" = 1 ]; then
+            [ -s "$note_file" ] && [ "$(git_note_oid "HEAD")" != "$kmt_note_oid" ] && echo "NOTE-OID Check Failed" && return 1
+        fi
+
+        [ -f "$note_file" ] && rm -f "$note_file"
+
     fi
 
     return 0
@@ -2892,13 +3321,13 @@ post_fetch()
 {
     old_commit_id="$1"
 
-    old_note_id="$(git_rev_parse "refs/notes/kmt/mtime")"
+    old_note_id="$(git_rev_parse "refs/notes/$NOTE_REF")"
 
     if ! origin_git fetch origin "+refs/notes/$NOTE_REF:refs/notes/$NOTE_REF"; then
         return 1
     fi
 
-    new_note_id=$(git_rev_parse "refs/notes/kmt/mtime")
+    new_note_id=$(git_rev_parse "refs/notes/$NOTE_REF")
 
     if [ -n "$old_note_id" ] &&
         [ -n "$new_note_id" ] &&
@@ -2956,14 +3385,14 @@ git_command_handler()
     [ -z "$cmd" ] && return 1
     ts_before=$(date +%s)
     case "$cmd" in
-        commit)
-            ! prev_commit && return 1
-            ;;
         add|rm|rename|checkout|restore)
-            #also can get the added files by the outputs as the following two commands
-            #git diff --name-only
-            #git diff --name-only --staged
-            modified_before=$(git_status_files --untracked-files=no | grep '^.M ' | cut -c 4-)
+            modified_before=$(git_status_files | grep '^.M' | cut -c 4-)
+            ;;
+        commit)
+            pre_commit || return 1
+            ;;
+        rebase)
+            pre_rebase "$@" || return 1
             ;;
         reset)
             ;;
@@ -2976,27 +3405,44 @@ git_command_handler()
     fi
 
     log "git cmd: $cmd"
-    #DO NOT USE ! ... && return $?, because ! command will change the $? to 0
+
+    if [ "$cmd" = "commit" ]; then
+        ! refresh_stage_note && echo "refresh stage note failed!" && return 1
+
+        select_arg "--trailer" "$@" | grep -q "^kmt-note-oid:" && echo "Do not specify the kmt-note-oid manually" && return 1
+
+        if [ "$ENABLE_OID_VERIFY" = 1 ]; then
+            stage_file=$(index_get_file "$old_commit_id" "stage")
+
+            [ -s "$stage_file" ] && kmt_note_oid=$(origin_git hash-object "$stage_file") || kmt_note_oid=
+
+            log "add trailer: $kmt_note_oid"
+
+            id=$(select_arg_pos "commit" "$@")
+
+            eval "$(insert_after "$((id + 1))" "2" "--trailer" "kmt-note-oid: $kmt_note_oid" "$@")"
+
+            log "args: $id, $*"
+        fi
+    fi
+
     origin_git "$@"
+
     ret=$?
 
     if [ "$ret" = 0 ]; then
         log "origin_git ok"
     else
         case "$cmd" in
-            revert)
-                ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert source not found" && return 1
-                revert_target=${revert_target%%.*}
-                [ "$ret" = 1 ] && post_merge_failed_with_conflicts "$revert_target~1" "$ts_before" "$@"
+            merge|revert｜rebase)
+                [ "$ret" = 1 ] && post_merge_failed_with_conflicts "$cmd" "$old_commit_id" "$ts_before" "$@"
                 ;;
-            merge)
-                ! merge_source=$(skip_opt_args_from "merge" "m" "$@") && echo "merge source not found" && return 1
-                [ "$ret" = 1 ] && post_merge_failed_with_conflicts "$merge_source" "$ts_before" "$@"
+            rebase)
+                post_rebase_failed_with_conflicts "$old_commit_id" "$ts_before"
                 ;;
         esac
         return $ret
     fi
-
 
     case "$cmd" in
         add|rm|rename)
@@ -3007,7 +3453,29 @@ git_command_handler()
         commit)
             log "post $cmd ..."
 
-            ! post_commit && echo "commit succeeded but timestamp note creation failed." && return 1
+            pre_stage_note_file="$(index_get_file "$old_commit_id" "stage")"
+
+            ! post_commit "$pre_stage_note_file" && echo "commit succeeded but timestamp note creation failed." && return 1
+
+            if [ "$ENABLE_OID_VERIFY" = 1 ]; then
+                verify_or_amend_commit_note "$pre_stage_note_file"
+                ret=$?
+                case "$ret" in
+                    1)
+                        echo "verify failed"
+                        return 1
+                    ;;
+                    2)
+                        echo "amended ok"
+                    ;;
+                    0)
+                        echo "verified ok"
+                        [ -s "$pre_stage_note_file" ] && [ "$(git_note_oid "HEAD")" != "$kmt_note_oid" ]  && echo "NOTE-OID Check Failed" && return 1
+                      ;;
+                esac
+            fi
+
+            [ -f "$pre_stage_note_file" ] && rm -f "$pre_stage_note_file"
 
             log "post $cmd ok"
             ;;
@@ -3038,6 +3506,7 @@ git_command_handler()
             log "post $cmd ok"
             ;;
         checkout)
+            log "post $cmd ..."
             source=$(select_arg "checkout" "$@")
             [ -z "$source" ] && echo "unknown branch" && return 1
 
@@ -3054,6 +3523,7 @@ git_command_handler()
                 #checkout path may be a dir, and they had moved into the stage
                 ! post_checkout_files "$modified_before" "$ts_before" "$source" && return 1
             fi
+            log "post $cmd ok"
             ;;
         switch)
             log "post $cmd ..."
@@ -3062,24 +3532,21 @@ git_command_handler()
             fi
             log "post $cmd ok"
             ;;
-        merge)
-            log "post merge ..."
-            ! merge_source=$(skip_opt_args_from "merge" "m" "$@") && echo "merge source not found" && return 1
-            ! post_merge_succeed_from_source "$old_commit_id" "$merge_source" "$ts_before" "$@" && return 1
+        merge|revert)
+            log "post $cmd ..."
+
+            ! post_merge_succeed_from_source "$cmd" "$old_commit_id" "$ts_before" "$@" && return 1
+
             log "post $cmd ok"
+            ;;
+        rebase)
+            post_rebase_succeed "$old_commit_id" "$@"
             ;;
         reset)
             log "post $cmd ..."
             if select_arg "--hard" "$@" && [ "$(git_current_head)" != "$old_commit_id" ]; then
                 ! on_head_moved && return 1
             fi
-            log "post $cmd ok"
-            ;;
-        revert)
-            log "post $cmd ..."
-            ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert target not found" && return 1
-            revert_target=${revert_target%%.*}
-            post_merge_succeed_from_source "$old_commit_id" "$revert_target~1" "$ts_before" "$@" || return 1
             log "post $cmd ok"
             ;;
         clone)
@@ -3125,8 +3592,8 @@ git_command_handler()
 
 init_path()
 {
-    #DONOT use pwd, it is not realpath, eg. /tmp
-    CUR_DIR=$(realpath)
+    #Use pwd -P to get the realpath, eg. /tmp
+    CUR_DIR=$(pwd -P)
     REPO_ROOT=$(git_repo_root)
     GIT_DIR=$(git_repo_dir)
     [ "$REPO_ROOT" = "$CUR_DIR" ] && SUB_DIR= || SUB_DIR=${CUR_DIR#*"$REPO_ROOT/"}/
@@ -3141,7 +3608,7 @@ show_note()
 
         if is_timestamp "$ts"; then
             fast_format_timestamp "$ts"
-            ts="$TM_RET"
+            ts="$FORMAT_RESULT"
         fi
 
         printf "%s,%s,%s,%s,%s\n" "$file" "$ts" "$ci" "$ct" "$l2nd_cts"
@@ -3152,6 +3619,8 @@ show_note()
 kmt_note_ui()
 {
     alias=${1:-HEAD}
+
+    app_is_working_copy || return 1
 
     ! commit=$(git_rev_parse "$alias") || [ -z "$commit" ] && echo "Commit not exists: $alias" && return 1
 
@@ -3206,17 +3675,17 @@ EOF
         case $key in
             1)
                 str=$(git_note_show "$commit") &&
-                    [ -n "$str" ] && printf "%s\n" "$str" | show_note||
+                    [ -n "$str" ] && print_n "$str" | show_note||
                     echo "$str"
                 ;;
             2)
                 str=$(index_show "full" "$commit") &&
-                    [ -n "$str" ] && printf "%s\n" "$str" | show_note||
+                    [ -n "$str" ] && print_n "$str" | show_note||
                     echo "$str"
                 ;;
             3)
                 str=$(index_show "stage" "$commit") &&
-                    [ -n "$str" ] && printf "%s\n" "$str" | show_note ||
+                    [ -n "$str" ] && print_n "$str" | show_note ||
                     echo "$str"
                 ;;
             4)
@@ -3304,6 +3773,10 @@ app_command_handler()
 
 app_is_working_copy()
 {
+    ! ret=$(origin_git rev-parse --is-inside-work-tree) && echo "Not in a git repository" &&  return 1
+
+    [ "$ret" != "true" ] && echo "Not in a work tree" && return 1
+
     return 0
 }
 
@@ -3316,13 +3789,16 @@ app_is_update_to_date()
 
 app_get_files_2_commit()
 {
-    #select diff to stage files
-    str=$(origin_git diff --name-only -z -- . | pipe_inline_encode | tr '\0' '\n' )
+    #select working files which diff to staged index
+    str=$(origin_git diff --name-only -z -- . | pipe_inline_encode | tr '\0' '\n')
     [ -n "$str" ] && echo "$str" && return 0
 
     #select added to stage but not committed files
-    str=$(git_status_files | grep "^[^?].*" |cut -c 4-)
+    str=$(git_status_files) || return 1
+    str=$(print_n "$str" | grep "^[^?]." | cut -c 4-)
     [ -n "$str" ] && echo "$str" && return 0
+
+    log "no working files"
 
     return 0
 }
@@ -3380,7 +3856,7 @@ app_save_file_mtime()
 
     ! rebuild_commit_note "$commit" && echo "update commit note failed" && return 1
 
-    log "rebuild_commit_note ok '$file'"
+    log "rebuild commit note ok '$file'"
 
     return 0
 }
