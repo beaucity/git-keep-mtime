@@ -30,7 +30,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.2.4'
+KMT_VERSION='0.2.4 Alpha'
 
 META_NAME="mtime-notes"
 
