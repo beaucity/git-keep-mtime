@@ -17,7 +17,7 @@
 #      are not handled by KMT to that executable.
 #
 #  Version:
-#      0.2.4
+#      0.2.7
 #
 #  Storage model:
 #      git notes --ref=kmt/mtime <commit>
@@ -30,7 +30,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.2.4 Alpha'
+KMT_VERSION='0.2.7'
 
 META_NAME="mtime-notes"
 
@@ -322,17 +322,17 @@ format_timestamp()
 
 fast_format_timestamp() {
     FORMAT_RESULT=
-    ts=$1
+    __ts=$1
     [ -z "$1" ] && return 1
 
-    tz=$2
-    [ -z "$tz" ] && tz="$TZ_SECONDS"
-    ts=$(($1 + tz))
+    tz=${2:-"$TZ_SECONDS"}
+
+    __ts=$((__ts + tz))
 
     mode=$3
 
-    days=$((ts / 86400))
-    sod=$((ts % 86400))
+    days=$((__ts / 86400))
+    sod=$((__ts % 86400))
 
     if [ "$sod" -lt 0 ]; then
         sod=$((sod + 86400))
@@ -379,6 +379,11 @@ fast_format_timestamp() {
 
     [ "$mode" = "1" ] && FORMAT_RESULT="${year}${month}${day}${hour}${minute}.${second}" ||
     FORMAT_RESULT="${year}-${month}-${day} ${hour}:${minute}:${second}"
+}
+
+format_timestamp_by_date()
+{
+    date -r "$1" "+%Y-%m-%d %H:%M:%S"
 }
 
 format_timestamp_old() {
@@ -693,7 +698,7 @@ select_any()
 
     for p in $keys
     do
-        select_arg "$p" && return 0
+        select_arg "$p" "$@" && return 0
     done
     return 1
 }
@@ -1826,9 +1831,11 @@ git_diff_commit_files()
     commit=${1:-HEAD}
 
 #    it should add param --root, or for the first commit, diff-tree will return empty.
+#    and should add commit~1, or the merged files will be ignored to a merged commit
+
 #    origin_git diff-tree --root --no-commit-id --no-renames --name-status -r "$commit" -z | xargs -0 -n 2 printf "%s$ETX%s\n"
 
-    origin_git diff-tree --root --no-commit-id --no-renames --name-status -r "$commit" -z |
+    origin_git diff-tree --root -m --no-commit-id --no-renames --name-status -r "$commit~1" "$commit" -z |
         pipe_inline_encode |
         xargs -0 -n 2 printf "%s$ETX%s\n"
 }
@@ -1850,7 +1857,7 @@ git_last_commit_of_files()
     commit="${1:-HEAD}"
     path_filter=
     [ -n "$2" ] && path_filter="-- $2"
-    origin_git log --pretty=format:"%H,%ct" --name-status --no-renames -z "$commit" $path_filter |
+    origin_git log --pretty=format:"%H,%ct" --diff-merges=first-parent --name-status --no-renames -z "$commit" $path_filter |
         tr '\0' "$EOT" |
         awk -F, -v RS="$EOT" -v OFS="$ETX" -v stx="$STX" -v elf="$ELF" '
             BEGIN {commit=""}
@@ -1903,7 +1910,7 @@ git_last_2_commits_of_files()
     path_filter=
     [ -n "$2" ] && path_filter="-- $2"
 
-    origin_git log --pretty=format:"%H,%ct" --name-status --no-renames -z "$commit" $path_filter |
+    origin_git log --pretty=format:"%H,%ct" --diff-merges=first-parent --name-status --no-renames -z "$commit" $path_filter |
         tr '\0' "$EOT" |
         awk -F, -v RS="$EOT" -v OFS="$ETX" -v stx="$STX" -v elf="$ELF" '
             BEGIN {commit=""}
@@ -1994,19 +2001,14 @@ git_note_show()
     origin_git notes --ref="$NOTE_REF" show "$1" 2>/dev/null
 }
 
-git_note_not_exists()
+git_note_oid()
 {
-    git_note_oid "$1" && [ $? = 1 ]
+    origin_git notes --ref="$NOTE_REF" list "$1"
 }
 
 git_note_copy()
 {
     origin_git notes --ref="$NOTE_REF" copy "$1" "$2"
-}
-
-git_note_oid()
-{
-    origin_git notes --ref="$NOTE_REF" list "$1"
 }
 
 # Look up the mtime of a file from a specific commit's note.
@@ -2719,7 +2721,11 @@ synchronize_file()
     decode_from_inline "$path"; path="$DECODE_RESULT"
 
     if [ -z "$file_ts" ]; then
-        [ ! -e "$path" ] && log "Path not exists: $path" && return 1
+        if [ ! -e "$path" ]; then
+            ls -l "$path"
+            log "Path not exists: $path"
+            return 1
+        fi
         ! file_ts=$(get_file_mtime "$path") && log "get_file_mtime failed: $path" && return 1
         [ "$file_ts" = "$ts" ] && log "same time: $file_ts, $ts" && return 0
     fi
@@ -2801,6 +2807,7 @@ checkout_mtime_from_source()
 {
     rpath="$1"
     source="$2"
+    file_fs="$3"
 
     #get the real commit of $path to the specified source"
     if ! last_commit=$(git_last_commit_of_file "${rpath#*"${SUB_DIR}"}" "$source"); then
@@ -2815,34 +2822,35 @@ checkout_mtime_from_source()
     [ -z "$note_ts" ] && echo "no timestamp to restore" && return 0
 
 #    log "$rpath, $note_ts, $last_commit"
-    synchronize_file "$rpath" "$note_ts" || return 1
+    synchronize_file "$rpath" "$note_ts" "$file_fs" || return 1
 
     return 0
 }
 
 restore_file_from_source()
 {
-    ir_path="$1"
+    ir_path="$1"    #inline path to repo root
     source="$2"
+    file_ts="$3"
 
     if [ -z "$source" ]; then
         # Look up the mtime of a file in the current HEAD's stage note.
         ! head_commit=$(git_current_head) && return 1
         stage_file=$(index_get_file "$head_commit" "stage")
 
-        if stage_ts=$(index_get_file_mtime "$ir_path" "$stage_file") && [ -n "$stage_ts" ]; then
+        if stage_ts=$(index_get_file_mtime "$STX$ir_path" "$stage_file") && [ -n "$stage_ts" ]; then
             if [ "D" != "$stage_ts" ]; then
                 log "restore from stage: $stage_ts"
-                ! synchronize_file "$ir_path" "$stage_ts" && return 1
+                ! synchronize_file "$ir_path" "$stage_ts" "$file_ts" && return 1
                 return 0
             fi
         fi
 
         log "restore from the last commit: $ir_path"
-        checkout_mtime_from_source "$ir_path" || return 1
+        checkout_mtime_from_source "$ir_path" "" "$file_ts" || return 1
     else
         log "checkout mtime from source: $source, '$ir_path'"
-        checkout_mtime_from_source "$ir_path" "$source" || return 1
+        checkout_mtime_from_source "$ir_path" "$source" "$file_ts" || return 1
     fi
 
     return 0
@@ -2875,10 +2883,19 @@ pre_commit()
     return 0
 }
 
+pre_revert()
+{
+    ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert target not found" && return 1
+
+    git_rev_parse "${revert_target%%.*}~1" > "$(index_get_file "revert_target" "last")"
+
+    return 0
+}
+
 pre_rebase()
 {
     REBASE_ONTO_COMMIT=
-    if select_arg "--continue"; then
+    if select_arg "--continue" "$@"; then
         pre_commit || return 1
 
         stage_file=$(index_get_file "$head_commit" "stage")
@@ -2886,6 +2903,11 @@ pre_rebase()
 
         message_file=".git/rebase-merge/message"
         [ -f "$message_file" ] || message_file=".git/rebase-apply/message"
+
+        [ -f "$message_file" ] || {
+            echo "rebase message file not found"
+            return 1
+        }
 
         if grep "^kmt-note-oid: " "$message_file"; then
             sed -i "s/^kmt-note-oid: .*/kmt-note-oid: ${kmt_note_oid}/" "$message_file" > "$message_file.$$"
@@ -3044,13 +3066,14 @@ post_merge_failed_with_conflicts()
     ! head_commit=$(git_current_head) && return 1
 
     if select_any "--continue" "--abort" "--quit" "$@"; then
-        log "pass"
+        log "pass $*"
     else
         if [ "$cmd" = "merge" ]; then
             ! source=$(skip_opt_args_from "merge" "m" "$@") && echo "merge source not found" && return 1
         elif [ "$cmd" = "revert" ]; then
-            ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert target not found" && return 1
-            source=${revert_target%%.*}~1
+            source=$(cat "$(index_get_file "revert_target" "last")")
+#            ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert target not found" && return 1
+#            source=${revert_target%%.*}~1
         else
             echo "Invalid command $cmd"
             return 1
@@ -3063,36 +3086,48 @@ post_merge_failed_with_conflicts()
         ! checkout_staged_file_mtimes_from_source "$source" "$ts_cmd" && return 1
     fi
 
-    refresh_stage_note
+    refresh_stage_note || return 1
+
+    return 0
 }
 
 parse_range_diff()
 {
-    awk '
-    /^[[:space:]]*[0-9-]+:[[:space:]]+[0-9a-f]+[[:space:]]+[<=>!][[:space:]]+[0-9-]+:[[:space:]]+[0-9a-f]+([[:space:]]|$)/ {
-        orig=$2
-        rewritten=$5
-
-        # "-------" is not a commit id.
-        if (orig != "-------" && rewritten != "-------")
-            print orig, rewritten
-    }
-    '
+    awk '{
+            left = "-"; right = "-"; n = 0; s = $0
+            while (match(s, /[0-9a-fA-F-]{40,}/)) {
+              seg = substr(s, RSTART, RLENGTH)
+              if (seg ~ /^-+$/) seg = "-"
+              n++
+              if (n == 1) left = seg
+              else if (n == 2) { right = seg; break }
+              s = substr(s, RSTART + RLENGTH)
+            }
+            print left, right
+        }'
 }
 
 complete_rewritten_commit()
 {
     while read -r orig_commit rewritten_commit
         do
-            if git_note_not_exists "$rewritten_commit"; then
+            log "$orig_commit, $rewritten_commit"
+
+            [ "$rewritten_commit" = "-" ] && log "skip orig_commit: $orig_commit" && continue
+
+            if ! git_note_show "$rewritten_commit"; then
                 prev_commit=$(git_prev_commit "$rewritten_commit") || return 1
 
                 prev_stage_file=$(index_get_file "$prev_commit" "stage")
 
                 if [ -f "$prev_stage_file" ]; then
+                    log "complete commit from stage: $prev_stage_file to $rewritten_commit"
                     git_note_add "$rewritten_commit" "$prev_stage_file" || return 1
                     rm -f "$prev_stage_file" || return 1
                 else
+                    [ "$orig_commit" = "-" ] && log "skip rewritten_commit: $rewritten_commit" && continue
+
+                    log "complete commit by copy: $orig_commit to $rewritten_commit"
                     git_note_copy "$orig_commit" "$rewritten_commit" || return 1
                 fi
             fi
@@ -3108,7 +3143,9 @@ post_rebase_failed_with_conflicts()
     shift
     shift
 
-    if ! select_any "--skip --abort --quit --edit-todo --show-current-patch" "$@"; then
+    if select_any "--skip --abort --quit --edit-todo --show-current-patch" "$@"; then
+        log "pass $*"
+    else
         # restore file mtimes to the rebase onto commit
         rewritten_list_file=".git/rebase-merge/rewritten-list"
         [ -f "$rewritten_list_file" ] || rewritten_list_file=".git/rebase-apply/rewritten-list"
@@ -3136,6 +3173,8 @@ post_rebase_succeed()
     old_commit_id=$1
     shift
 
+    log "params: $old_commit_id, $*"
+
     if ! select_any "--skip --abort --quit --edit-todo --show-current-patch" "$@"; then
         # old_commit_id is not the real orig_head when --continue
         # the ORIG_HEAD is also untrustable, it may changed when rebase --skip
@@ -3144,29 +3183,41 @@ post_rebase_succeed()
 #        orig_head=$(git_rev_parse ORIG_HEAD)
 
         last_head_file=$(index_get_file "rebase_orig_head" "last")
-        if [ -f "$last_head_file" ]; then
-            orig_head=$(cat "$last_head_file")
+        if [ ! -f "$last_head_file" ]; then
+            echo "Last rebase orig head file missing"
+            return 1
         fi
+
+        orig_head=$(cat "$last_head_file")
+
+        [ -z "$orig_head" ] && echo "orig_head not found" && return 1
 
         onto_commit="$REBASE_ONTO_COMMIT"
 
-        if range_diff_list=$(origin_git range-diff --no-color \
+        [ -z "$onto_commit" ] && echo "onto_commit not found" && return 1
+
+        if range_diff_list=$(origin_git range-diff --no-abbrev --no-color \
                         "$onto_commit..$orig_head" \
                         "$onto_commit..HEAD"
                         ); then
+
+#            log "range_diff $onto_commit..$orig_head, $onto_commit..HEAD:
+#$range_diff_list"
+
             print_n "$range_diff_list" |
                       parse_range_diff |
                       complete_rewritten_commit || return 1
         else
-            log "range-diff failed"
+            log "range-diff failed $onto_commit..$orig_head, $onto_commit..HEAD"
+            return 1
         fi
     fi
 
     if [ "$old_commit_id" != "$(git_current_head)" ]; then
-        on_head_moved || return 1
+        ! on_head_moved && echo "on head moved failed" && return 1
     fi
 
-    refresh_stage_note || return 1
+    ! refresh_stage_note && echo "refresh_stage_note failed" && return 1
 
     return 0
 
@@ -3183,26 +3234,25 @@ post_merge_succeed_from_source()
     shift
 
     source=
-    if ! { select_arg "--continue" "$@"|| select_arg "--abort" "$@" || select_arg "--quit" "$@";}; then
+    if ! select_any "--continue --abort --quit" "$@"; then
         if [ "$cmd" = "merge" ]; then
             ! source=$(skip_opt_args_from "merge" "m" "$@") && echo "merge source not found" && return 1
         elif [ "$cmd" = "revert" ]; then
-            ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert target not found" && return 1
-            source=${revert_target%%.*}~1
-        elif [ "$cmd" = "rebase" ]; then
-            ! rebase_on=$(skip_opt_args_from "rebase" "m" "$@") && echo "rebase source not found" && return 1
-            source="$rebase_on"
+            source=$(cat "$(index_get_file "revert_target" "last")")
+#            ! revert_target=$(skip_opt_args_from "revert" "m" "$@") && echo "revert target not found" && return 1
+#            source=${revert_target%%.*}~1
+            log "revert source: $source"
         else
             echo "Invalid command $cmd"
             return 1
         fi
-        [ -z "$source" ] && echo "No source to $cmd" && return 1
+        [ -z "$source" ] && echo "No source to $cmd, $*" && return 1
     fi
 
     ! head_commit=$(git_current_head) && return 1
 
     if [ "$old_commit_id" = "$head_commit" ]; then
-        if ! { select_arg "--abort" "$@" || select_arg "--quit" "$@"; }; then
+        if ! select_any "--abort --quit" "$@"; then
             ! checkout_staged_file_mtimes_from_source "$source" "$ts_cmd" && return 1
         fi
 
@@ -3289,20 +3339,20 @@ post_restore_files()
 
         if [ -d "$path" ]; then
             # restore the mtime for each files which fs mtime later then $ts_before in $sub_files
-            sub_files=$(preview_fs_mtime "HEAD" "$path")
+            sub_files=$(preview_fs_mtime "HEAD" "$path" | cut -c 2-)
             [ -n "$sub_files" ] && while IFS="$ETX" read -r ir_file file_ts
                 do
                     [ "$file_ts" -lt "$cmd_ts" ] && continue
-                    ! restore_file_from_source "$ir_file" "$source" && return 1
+                    ! restore_file_from_source "$ir_file" "$source" "$file_ts" && return 1
                 done <<EOF
 $sub_files
 EOF
         else
             ! file_ts=$(get_file_mtime "$path") && return 1
 
-            [ "$file_ts" -lt "$cmd_ts" ] && echo "$file_ts < $cmd_ts" && continue
+            [ "$file_ts" -lt "$cmd_ts" ] && echo "file not changed: $file_ts < $cmd_ts" && continue
 
-            ! restore_file_from_source "$SUB_DIR$ipath" "$source" && echo "restore failed: $SUB_DIR, $path" && return 1
+            ! restore_file_from_source "$SUB_DIR$ipath" "$source" "$file_ts" && echo "restore failed: $SUB_DIR, $path" && return 1
         fi
     done << EOF
 $files
@@ -3391,6 +3441,9 @@ git_command_handler()
         commit)
             pre_commit || return 1
             ;;
+        revert)
+            pre_revert "$@" || return 1
+            ;;
         rebase)
             pre_rebase "$@" || return 1
             ;;
@@ -3404,9 +3457,10 @@ git_command_handler()
         ! old_commit_id=$(git_current_head) && return 1
     fi
 
-    log "git cmd: $cmd"
+#    log "git cmd: $*"
 
     if [ "$cmd" = "commit" ]; then
+
         ! refresh_stage_note && echo "refresh stage note failed!" && return 1
 
         select_arg "--trailer" "$@" | grep -q "^kmt-note-oid:" && echo "Do not specify the kmt-note-oid manually" && return 1
@@ -3431,16 +3485,17 @@ git_command_handler()
     ret=$?
 
     if [ "$ret" = 0 ]; then
-        log "origin_git ok"
+        log "origin_git $cmd ok"
     else
         case "$cmd" in
-            merge|revert｜rebase)
+            merge|revert)
                 [ "$ret" = 1 ] && post_merge_failed_with_conflicts "$cmd" "$old_commit_id" "$ts_before" "$@"
                 ;;
             rebase)
-                post_rebase_failed_with_conflicts "$old_commit_id" "$ts_before"
+                [ "$ret" = 1 ] && post_rebase_failed_with_conflicts "$old_commit_id" "$ts_before"
                 ;;
         esac
+        log "origin_git $cmd failed: $ret"
         return $ret
     fi
 
@@ -3540,12 +3595,14 @@ git_command_handler()
             log "post $cmd ok"
             ;;
         rebase)
-            post_rebase_succeed "$old_commit_id" "$@"
+            log "post $cmd ..."
+            ! post_rebase_succeed "$old_commit_id" "$@" && echo "post $cmd failed" && return 1
+            log "post $cmd ok"
             ;;
         reset)
             log "post $cmd ..."
             if select_arg "--hard" "$@" && [ "$(git_current_head)" != "$old_commit_id" ]; then
-                ! on_head_moved && return 1
+                on_head_moved || return 1
             fi
             log "post $cmd ok"
             ;;
