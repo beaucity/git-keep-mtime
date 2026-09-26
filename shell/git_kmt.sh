@@ -2148,10 +2148,14 @@ git_note_mtime()
     ! line=$(git_note_show "$commit" | grep -m 1 -F "$STX$rpath$ETX") && return 1
 
     val=${line#*"$ETX"}
-    MTIME_RESULT="${val%%"$ETX"*}"
-
-    val=${val#*"$ETX"}
-    BTIME_RESULT="${val%%"$ETX"*}"
+    if [ "$val" = "$line" ]; then
+        MTIME_RESULT=""
+        BTIME_RESULT=""
+    else
+        MTIME_RESULT="${val%%"$ETX"*}"
+        next_value=${val#*"$ETX"}
+        [ "$val" = "$next_value" ] && BTIME_RESULT="" || BTIME_RESULT="${next_value%%"$ETX"*}"
+    fi
 
     return 0
 }
@@ -2306,11 +2310,14 @@ index_get_file_mtime()
     index_find_line "$1" "$2" || return 1
 
     val=${FOUND_LINE#*"$ETX"}
-    MTIME_RESULT="${val%%"$ETX"*}"
-
-    next_value=${val#*"$ETX"}
-
-    [ "$val" = "$next_value" ] && BTIME_RESULT="" || BTIME_RESULT="${next_value%%"$ETX"*}"
+    if [ "$val" = "$FOUND_LINE" ]; then
+        MTIME_RESULT=""
+        BTIME_RESULT=""
+    else
+        MTIME_RESULT="${val%%"$ETX"*}"
+        next_value=${val#*"$ETX"}
+        [ "$val" = "$next_value" ] && BTIME_RESULT="" || BTIME_RESULT="${next_value%%"$ETX"*}"
+    fi
 
 #    log "line: $FOUND_LINE, $MTIME_RESULT, $BTIME_RESULT"
 
@@ -2607,7 +2614,7 @@ update_note_time_table()
                     if ! index_get_file_mtime "$sfile" "$cache_file"; then
                         log "file missing in note, type: $type, file: '$sfile', note-file: $cache_file"
 #                        cat "$cache_file"
-#                        return 1
+                        return 1
                     else
                         [ "$type" = 1 ] && note_mtime="$MTIME_RESULT" || note_btime="$BTIME_RESULT"
                     fi
