@@ -2607,7 +2607,7 @@ update_note_time_table()
                     if ! index_get_file_mtime "$sfile" "$cache_file"; then
                         log "file missing in note, type: $type, file: '$sfile', note-file: $cache_file"
 #                        cat "$cache_file"
-                        return 1
+#                        return 1
                     else
                         [ "$type" = 1 ] && note_mtime="$MTIME_RESULT" || note_btime="$BTIME_RESULT"
                     fi
