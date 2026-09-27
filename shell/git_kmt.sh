@@ -17,7 +17,7 @@
 #      are not handled by KMT to that executable.
 #
 #  Version:
-#      0.2.9
+#      0.3.0
 #
 #  Storage model:
 #      git notes --ref=kmt/mtime <commit>
@@ -30,7 +30,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.2.9'
+KMT_VERSION='0.3.0'
 
 META_NAME="time-notes"
 
@@ -1259,9 +1259,9 @@ on_file_scan()
 {
     file=$1
     file_mts=$2
-    file_cts=$3
+    file_bts=$3
     prop_mts=$4
-    prop_cts=$5
+    prop_bts=$5
 
     last_cts=$6
     l2nd_cts=${7:-0}
@@ -1277,7 +1277,7 @@ on_file_scan()
     file_conflicts=0
 
     [ -z "$file_mts" ] && echo "No file mtime provided: '$*'" && return 1
-    [ -z "$file_cts" ] && echo "No file btime provided: '$*'" && return 1
+    [ -z "$file_bts" ] && echo "No file btime provided: '$*'" && return 1
 
 
     if [ -n "$prop_mts" ]; then
@@ -1341,16 +1341,16 @@ on_file_scan()
         fi
     fi
 
-    if [ -n "$prop_cts" ]; then
-        if [ "$file_cts" -lt "$prop_cts" ]; then
+    if [ -n "$prop_bts" ]; then
+        if [ "$file_bts" -ge 0 ] && [ "$file_bts" -lt "$prop_bts" ]; then
             if [ "$cmd" = "resolve" ]; then
-                ! app_complete_file_time "$file" "2" "$file_cts" "$first_cts" &&
-                    echo "Resolve btime failed $(format_timestamp "$prop_cts") $(format_timestamp "$file_cts") '$file'" &&  return 1
+                ! app_complete_file_time "$file" "2" "$file_bts" "$first_cts" &&
+                    echo "Resolve btime failed $(format_timestamp "$prop_bts") $(format_timestamp "$file_bts") '$file'" &&  return 1
 
-                echo "Resolve conflicting mtime $(format_timestamp "$prop_cts") replace with $(format_timestamp "$file_cts") '$file'"
+                echo "Resolve conflicting mtime $(format_timestamp "$prop_bts") replace with $(format_timestamp "$file_bts") '$file'"
                 file_effected=1
             else
-                [ "$cmd" = "show_conflict" ] && echo "Conflict btime repos: $(format_timestamp "$prop_cts") local: $(format_timestamp "$file_cts") $file"
+                [ "$cmd" = "show_conflict" ] && echo "Conflict btime repos: $(format_timestamp "$prop_bts") local: $(format_timestamp "$file_bts") $file"
                 file_conflicts=1
             fi
         fi
@@ -1358,14 +1358,14 @@ on_file_scan()
         file_completed=0
         [ -z "$first_cts" ] && echo "No first commit timestamp provided: '$file'" && return 1
 
-        if [ "$file_cts" -lt "$first_cts" ]; then
+        if [ "$file_bts" -ge 0 ] && [ "$file_bts" -lt "$first_cts" ]; then
             if [ "$cmd" = 'complete' ]; then
-                ! app_complete_file_time "$file" "2" "$file_cts" "$first_cts" && echo "Complete btime failed, commit-time: $(format_timestamp "$first_cts") file-btime: $(format_timestamp "$file_cts") '$file'" &&  return 1
-                echo "Completing btime $(format_timestamp "$file_cts") '$file'"
+                ! app_complete_file_time "$file" "2" "$file_bts" "$first_cts" && echo "Complete btime failed, commit-time: $(format_timestamp "$first_cts") file-btime: $(format_timestamp "$file_bts") '$file'" &&  return 1
+                echo "Completing btime $(format_timestamp "$file_bts") '$file'"
                 file_effected=1
             else
                 if [ "$cmd" = "show_completable" ]; then
-                    echo "Completable btime $(format_timestamp "$first_cts") $(format_timestamp "$file_cts") $file"
+                    echo "Completable btime $(format_timestamp "$first_cts") $(format_timestamp "$file_bts") $file"
                 fi
                 file_completable=1
             fi
@@ -1490,13 +1490,13 @@ EOF
     log "on scanned: $*"
 
     now_ts=$(date +%s)
-    [ -n "$str" ] && while IFS="$SEP" read -r file file_mts file_cts prop_mts prop_cts last_cts l2nd_cts first_cts
+    [ -n "$str" ] && while IFS="$SEP" read -r file file_mts file_bts prop_mts prop_bts last_cts l2nd_cts first_cts
     do
 #        log "on file: $file"
         decode_from_inline "$file"
         defile="$DECODE_RESULT"
 #        log "real file: $defile"
-        ! on_file_scan "$defile" "$file_mts" "$file_cts" "$prop_mts" "$prop_cts" "$last_cts" "$l2nd_cts" "$first_cts" && return 1
+        ! on_file_scan "$defile" "$file_mts" "$file_bts" "$prop_mts" "$prop_bts" "$last_cts" "$l2nd_cts" "$first_cts" && return 1
     done << EOF
 $str
 EOF
@@ -1856,7 +1856,7 @@ git_last_commit_of_file()
 git_status_files()
 {
 #    origin_git status --short -z "$@" | tr '\0' '\n'
-    origin_git status --short --untracked-files=no -z | pipe_inline_encode | tr '\0' '\n'
+    origin_git status --short --no-renames --untracked-files=no -z | pipe_inline_encode | tr '\0' '\n'
 }
 
 #git_diff_staged_files()
@@ -1908,7 +1908,7 @@ preview_fs_mtime()
     origin_git ls-tree -r --full-tree --name-only "$commit" -z -- "$path" |
 #        tr '\0' "$EOT" | complete_directory | tr "$EOT" '\0' |
         tr '\0' "$EOT" | complete_directory |
-        batch_stat_mc |
+        batch_stat_mtime_btime |
         index_encode_inline
 }
 
@@ -2167,24 +2167,33 @@ note_show_history()
 
     [ -z "$path" ] && echo "history requires a file path" && return 1
 
-    # if you want to track the rename history, add --follow and --name-staus to git log
-    # read out the origin name when renamed, use origin name to show history mtimes
-    # THIS has not implemented yet.
-
-    ! prev_commits=$(origin_git log --format='%H,%cI' "$commit" -- "$path") && return 1
+    prev_commits=$(origin_git log --format='%H,%ct' --follow --name-only "$commit" -z -- "$path" | tr '\0' "$EOT" |
+        awk -v RS="$EOT" -v OFS="$ETX" -v elf="$ELF" '
+            /^[0-9a-f]{40,},[0-9]+/ {
+                split($0, arr, ",")
+                commit=arr[1];
+                ct=arr[2];
+                next
+            }
+            NF{
+                line=$0
+                line=substr(line, 2)
+                gsub("\n",elf,line)
+                print line, commit, ct
+                next
+            }
+        ') || return 1
 
     encode_into_inline "$path" && path="$ENCODE_RESULT"
 
     [ -z "$prev_commits" ] && echo "no history: '$path'" && return 0
 
-    echo "$prev_commits" |
-        while IFS="," read -r commit date; do
-            git_note_mtime "$SUB_DIR$path" "$commit" && note_ts="$MTIME_RESULT"
-            if [ -n "$note_ts" ]; then
-                printf '%s | %s | %s | %s\n' "$commit" "$date" "$note_ts" "$(format_timestamp "$note_ts")"
-            else
-                printf '%s | %s | %10s | %s\n' "$commit" "$date" "$note_ts" "$(format_timestamp "")"
-            fi
+    printf '%40s | %11s | %11s | %20s | %11s | %s\n' "COMMIT-ID" "COMMIT-TIME" "NOTE-MTIME" "FORMATTED-NOTE-MTIME" "NOTE-BTIME" "FILE-NAME"
+
+    print_n "$prev_commits" |
+        while IFS="$ETX" read -r file commit commit_time; do
+            git_note_mtime "$SUB_DIR$file" "$commit" && note_ts="$MTIME_RESULT"
+            printf '%s | %11s | %11s | %20s | %11s | %s\n' "$commit" "$commit_time" "$note_ts" "$(format_timestamp "$note_ts")" "$BTIME_RESULT" "$file"
         done
 }
 
@@ -2327,11 +2336,18 @@ index_get_file_mtime()
 index_is_valid()
 {
     case "$1" in
-        delta|stage)
+        stage)
             if [ -z "$2" ]; then
                 ! grep -Ev "^${STX}.*${ETX}(D|[0-9]+)${ETX}([0-9]*)$"
             else
                 ! grep -Ev "^${STX}.*${ETX}(D|[0-9]+)${ETX}([0-9]*)$" "$2"
+            fi
+            ;;
+        delta)
+            if [ -z "$2" ]; then
+                ! grep -Ev "^${STX}.*${ETX}(D|[0-9]*)${ETX}([0-9]*)$"
+            else
+                ! grep -Ev "^${STX}.*${ETX}(D|[0-9]*)${ETX}([0-9]*)$" "$2"
             fi
             ;;
         full)
@@ -2444,11 +2460,11 @@ refresh_stage_note()
     [ -f "$stage_file_temp" ] && rm -f "$stage_file_temp"
 
     if [ -n "$status_files" ]; then
-        print_n "$status_files" | select_stage_files "$newly_added_files" "A" "$head_commit" | pipe_inline_decode | batch_stat_mc >> "$stage_file_temp"
-        print_n "$status_files" | select_stage_files "$newly_added_files" "M"  "$head_commit"| pipe_inline_decode | batch_stat_mc >> "$stage_file_temp"
+        print_n "$status_files" | select_stage_files "$newly_added_files" "A" "$head_commit" | pipe_inline_decode | batch_stat_mtime_btime >> "$stage_file_temp"
+        print_n "$status_files" | select_stage_files "$newly_added_files" "M"  "$head_commit"| pipe_inline_decode | batch_stat_mtime_empty >> "$stage_file_temp"
         print_n "$status_files" | select_stage_files "$newly_added_files" "D"  "$head_commit"
 
-        print_n "$status_files" | select_modified_directories | pipe_inline_decode | batch_stat_mc>> "$stage_file_temp" || return 1
+        print_n "$status_files" | select_modified_directories | pipe_inline_decode | batch_stat_mtime_btime>> "$stage_file_temp" || return 1
 
         ! index_file_encode_inline "$stage_file_temp" && return 1
 
@@ -2483,17 +2499,19 @@ prepare_status_files()
 {
     while IFS="$ETX" read -r status rfile
     do
+        [ "$status" = "$1" ] || continue
+
         if [ "$status" = "D" ]; then
             printf "%sD%s\n" "$STX$rfile$ETX" "$ETX"
             continue
         fi
 
         if ! escaped_file_exists "$REPO_ROOT/$rfile"; then
+            log "no exists: $rfile"
             printf "%s\n" "$STX$rfile$ETX$ETX"
-            continue
+        else
+            printf "%s\0" "$rfile"
         fi
-
-        [ "$status" = "$1" ] && printf "%s\0" "$rfile"
 
     done
 }
@@ -2512,22 +2530,17 @@ prebuild_commit_note()
 
     # Step 2 --- print out empty meta-data for the deleted or not exists diff-files
     print_n "$commit_files" | prepare_status_files "D"
+    log "commit_files: $commit_files"
 
     # Step 3 --- stat the mtime/btime for exists diff-files
-    if ! added_files=$(print_n "$commit_files" | prepare_status_files "A" | pipe_inline_decode | batch_stat_mc | index_encode_inline); then
-        echo "stat failed: $added_files"
-        return 1
-    fi
+    added_files=$(print_n "$commit_files" | prepare_status_files "A" | pipe_inline_decode | batch_stat_mtime_btime | index_encode_inline)
+    print_n "$added_files" | index_is_valid "delta" || return 1
 
-    if ! modified_files=$(print_n "$commit_files" | prepare_status_files "M" | pipe_inline_decode | batch_stat_mc | index_encode_inline); then
-        echo "stat failed: $modified_files"
-        return 1
-    fi
+    modified_files=$(print_n "$commit_files" | prepare_status_files "M" | pipe_inline_decode | batch_stat_mtime_empty | index_encode_inline)
+    print_n "$modified_files" | index_is_valid "delta" || return 1
 
-    if ! modified_dirs=$(print_n "$commit_files" | select_diff_directories | pipe_inline_decode | batch_stat_mc | index_encode_inline); then
-        echo "stat failed: $modified_dirs"
-        return 1
-    fi
+    modified_dirs=$(print_n "$commit_files" | select_diff_directories | pipe_inline_decode | batch_stat_mtime_btime | index_encode_inline)
+    print_n "$modified_dirs" | index_is_valid "delta" || return 1
 
     log "commit_files: $commit_files, modified_dirs: $modified_dirs"
 
@@ -2613,8 +2626,7 @@ update_note_time_table()
                 if [ -f "$cache_file" ]; then
                     if ! index_get_file_mtime "$sfile" "$cache_file"; then
                         log "file missing in note, type: $type, file: '$sfile', note-file: $cache_file"
-#                        cat "$cache_file"
-                        return 1
+                        [ -f "${sfile#*"$STX"}" ] && return 1
                     else
                         [ "$type" = 1 ] && note_mtime="$MTIME_RESULT" || note_btime="$BTIME_RESULT"
                     fi
@@ -2957,8 +2969,6 @@ git_repo_dir()
 
 python_batch_stat()
 {
-    with_btime="$1"
-
     cmd=$(find_command "python3") || cmd=$(find_command "python")
     main_code='
 import os, sys
@@ -2977,35 +2987,48 @@ for n in [x for x in data.split(NUL) if x]:
     except Exception as x:
         sys.stderr.write("%r: %s\n" % (n, x))
         continue
-    out.write(STX + n + ETX + (str(mts).encode() if isinstance(n, bytes) else str(mts)) + \
-                        ETX + (str(bts).encode() if isinstance(n, bytes) else str(bts)) + NL)
-'
+    out.write(STX + n \
+              + ETX + (str(mts).encode() if isinstance(n, bytes) else str(mts))\
+              + ETX'
 
-    $cmd -c "$main_code"
 
-#    [ "$with_btime" = 1 ] &&
-#        ext_data="ETX + (str(bts).encode() if isinstance(n, bytes) else str(bts)) + NL)" ||
-#        ext_data="NL)"
-#
-#    $cmd -c "$main_code $ext_data"
+    if [ "$1" = 1 ]; then
+        ext_data=" + (str(bts).encode() if isinstance(n, bytes) else str(bts)) + NL )
+"
+    else
+        ext_data=" + NL )
+"
+    fi
+
+    $cmd -c "$main_code $ext_data"
+
 }
 
-batch_stat_mc()
+batch_stat_mtime_ext()
 {
-#    with_empty_btime="$1"
     cd "$REPO_ROOT" || return 1
 
-    if [ "$SCAN_BACKEND" = 'python' ]; then
-        python_batch_stat "$with_btime"
+    if false && [ "$SCAN_BACKEND" = 'python' ]; then
+        python_batch_stat "$1"
     else
         if [ "$PLATFORM" = 'linux' ]; then
-#            [ "$with_empty_btime" = 1 ] && ext_data="" || ext_data="%W"
-            xargs -0 -L 100 stat -c "$STX%n$ETX%Y$ETX%W"
+            [ "$1" = 1 ] && ext_data="%W" || ext_data=""
+            xargs -0 -L 100 stat -c "$STX%n$ETX%Y$ETX$ext_data"
         else
-#            [ "$with_empty_btime" = 1 ] && ext_data="" || ext_data="%B"
-            xargs -0 -L 100 stat -f "$STX%N$ETX%m$ETX%B"
+            [ "$1" = 1 ] && ext_data="%B" || ext_data=""
+            xargs -0 -L 100 stat -f "$STX%N$ETX%m$ETX$ext_data"
         fi
     fi
+}
+
+batch_stat_mtime_btime()
+{
+    batch_stat_mtime_ext "1"
+}
+
+batch_stat_mtime_empty()
+{
+    batch_stat_mtime_ext ""
 }
 
 synchronize_file()
@@ -3167,7 +3190,7 @@ pre_commit()
     now_ts=$(date +%s)
     head_commit=$(git_current_head)
 
-    ! refresh_stage_note && return 1
+    ! refresh_stage_note && echo "refresh stage note failed" && return 1
 
     stage_file=$(index_get_file "$head_commit" "stage")
     [ ! -f "$stage_file" ] && return 0
@@ -3746,7 +3769,7 @@ git_command_handler()
     [ -z "$cmd" ] && return 1
     ts_before=$(date +%s)
     case "$cmd" in
-        add|rm|rename|checkout|restore)
+        add|mv|rm|checkout|restore)
             working_files_before=$(git_status_files | grep '^.M' | cut -c 4-)
             ;;
         commit)
@@ -3811,7 +3834,7 @@ git_command_handler()
     fi
 
     case "$cmd" in
-        add|rm|rename)
+        add|mv|rm)
             log "post $cmd ..."
             ! refresh_stage_note "$working_files_before" && echo "$cmd succeeded but timestamp note $cmd failed." && return 1
             log "post $cmd ok"
@@ -4141,7 +4164,7 @@ app_command_handler()
                 origin_git "$@"
             fi
             ;;
-        add|rm|rename|commit|merge|restore|revert|reset|rebase|switch|checkout|clone|push|fetch|pull)
+        add|rm|mv|commit|merge|restore|revert|reset|rebase|switch|checkout|clone|push|fetch|pull)
             init_path
             git_command_handler "$cmd" "$@"
             ;;
