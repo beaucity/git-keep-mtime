@@ -3259,8 +3259,12 @@ update_note_time_table()
 
                 if [ -f "$cache_file" ]; then
                     if ! index_get_file_time "$sfile" "$cache_file"; then
-                        log "file missing in note, type: $type, file: '$sfile', note-file: $cache_file"
-                        [ -e "${sfile#*"$STX"}" ] && return 1
+                        if [ -f "${sfile#*"$STX"}" ]; then
+                            log "file missing in note, type: $type, file: '$sfile', note-file: $cache_file"
+                            return 1
+                        elif [ -d "${sfile#*"$STX"}" ]; then
+                            log "dir missing in note, type: $type, file: '$sfile', note-file: $cache_file"
+                        fi
                     else
                         if [ "$type" = 1 ]; then
                             note_mtime="$MTIME_RESULT"
@@ -4761,7 +4765,8 @@ kmt_note()
             ! rebuild_commit_note "$commit" && return 1
             ;;
         8)
-            prebuild_full_index "$commit" | LC_ALL=C sort | show_note
+            ! str=$(prebuild_full_index "$commit") && echo "build failed" && return 1
+            print_n "$str"  | LC_ALL=C sort | show_note
             ;;
         9)
             ! rebuild_full_index "$commit" && echo "build full note for $commit failed" && return 1
