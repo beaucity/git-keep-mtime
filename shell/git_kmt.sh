@@ -17,7 +17,7 @@
 #      are not handled by KMT to that executable.
 #
 #  Version:
-#      0.4.1
+#      0.4.5
 #
 #  Storage model:
 #      git notes --ref=kmt/mtime <commit>
@@ -30,7 +30,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.4.1'
+KMT_VERSION='0.4.5'
 
 META_NAME="time-notes"
 
@@ -504,10 +504,12 @@ set_file_btime()
 {
     case "$PLATFORM" in
         linux)
+          log "not support on linux"
           return 1
           ;;
         macos)
-          setfile -d "$(date -r "$2" "+%m/%d/%Y %H:%M:%S")" "$1" || return 1
+          fast_format_timestamp "$2" "" "2"
+          setfile -d "$FORMAT_RESULT" "$1" || return 1
           ;;
     esac
     return 0
@@ -530,10 +532,17 @@ get_timestamp()
     esac
 }
 
+
+# try update btime by python
+#
+# if btime < fs-btime
+#     utime(btime)
+#     utime(mtime)
+#else
+#    ouput to bts_temp_file
+
 python_touch()
 {
-    bts_file_path="$1"
-
     cmd=$(find_command "python3") || cmd=$(find_command "python")
 
     "$cmd" -c "
@@ -542,7 +551,7 @@ from datetime import datetime, timezone
 
 buf = getattr(sys.stdin, 'buffer', sys.stdin)
 e = 0
-bts_file_path = '$bts_file_path'
+bts_file_path = '$1'
 bts_file=None
 if bts_file_path != '':
     bts_file=open(bts_file_path,'w')
@@ -559,7 +568,7 @@ for line in buf:
         continue
 
 #    name, sep, mts = line.partition(etx)
-    name, mts, bts = line.split(etx,2)
+    name, mts, bts, fs_mts, fs_bts = line.split(etx,4)
 
     if not name:
         sys.stderr.write('skip: %r\n' % (line,))
@@ -568,13 +577,49 @@ for line in buf:
     try:
         p = name if isinstance(name, str) else os.fsdecode(name)
         p=p.replace('\x0E', '\n')
-        os.utime(p, (int(mts), int(mts)), follow_symlinks=False)
-        sys.stderr.write('utime: %s, %d\n' % (p,int(mts)))
-        if bts_file is not None and bts!=b'' and bts!='':
-            dt = datetime.fromtimestamp(int(bts))
-            formatted=dt.strftime('%m/%d/%Y %H:%M:%S')
+
+        i_mts=None
+        i_bts=None
+        i_fs_mts=None
+        i_fs_bts=None
+        mtime = os.path.getmtime(p)
+
+        if mts!=b'' and mts!='':
+            i_mts=int(mts)
+
+        if bts!=b'' and bts!='':
+            i_bts=int(bts)
+
+        if fs_mts!=b'' and fs_mts!='':
+            i_fs_mts=int(fs_mts)
+
+        if fs_bts!=b'' and fs_bts!='':
+            i_fs_bts=int(fs_bts)
+
+        bts_updated=False
+
+        if i_mts is None:
+            if i_bts is not None and i_fs_bts is not None and i_bts < i_fs_bts and i_fs_mts is not None:
+                atime = os.path.getatime(p)
+                os.utime(p, (i_bts, i_bts), follow_symlinks=False)
+#               sys.stderr.write('utime: %s, %d\n' % (p,i_bts))
+                os.utime(p, (atime, i_fs_mts), follow_symlinks=False)
+#               sys.stderr.write('utime: %s, %d\n' % (p,i_fs_mts))
+                bts_updated=True
+        else:
+            if i_bts is not None and i_fs_bts is not None and i_bts < i_fs_bts:
+                os.utime(p, (i_bts, i_bts), follow_symlinks=False)
+#               sys.stderr.write('utime: %s, %d\n' % (p,i_bts))
+                bts_updated=True
+
+            if not bts_updated or i_mts != i_bts:
+                os.utime(p, (i_mts, i_mts), follow_symlinks=False)
+#               sys.stderr.write('utime: %s, %d\n' % (p,i_mts))
+
+        if i_bts is not None and not bts_updated:
+            formatted = datetime.fromtimestamp(i_bts).strftime('%m/%d/%Y %H:%M:%S')
             bts_file.write('%s\x00%s\x00'%(formatted, p))
-            sys.stderr.write('u-btime: %s, %s, %d\n' % (formatted, p, int(bts)))
+            sys.stderr.write('delay set-btime: %s, %s, %d\n' % (formatted, p, i_bts))
 
     except Exception as x:
         sys.stderr.write('%r: %s\n' % (name, x))
@@ -589,23 +634,70 @@ sys.exit(1 if e else 0)
 
 pre_batch_touch()
 {
-    while IFS="$ETX" read -r fn mts bts
+    while IFS="$ETX" read -r fn mts bts fs_mts fs_bts
     do
+        decode_from_inline "$fn" && fn="$DECODE_RESULT"
+
         if [ "$PLATFORM" = 'linux' ]; then
             printf "%s\0%s\0" "$mts" "$fn"
 #            printf "%s\0" "$fn"
-            if [ -z "$1" ]; then
-                printf "%s\0%s\0" "$bts" "$fn"
+            if [ -n "$1" ]; then
+                printf "%s\0%s\0" "$bts" "$fn" >> "$1"
             fi
         else
-            fast_format_timestamp "$mts" "" "1"
-            printf "%s\0%s\0" "$FORMAT_RESULT" "$fn"
-            if [ -z "$1" ]; then
-                fast_format_timestamp "$bts" "" "2"
-                printf "%s\0%s\0" "$FORMAT_RESULT" "$fn" >> "$1"
+            bts_updated=0
+
+            if [ -z "$mts" ]; then
+                if [ -n "$bts" ] && [ -n "$fs_bts" ] && [ "$bts" -lt "$fs_bts" ] && [ -n "$fs_mts" ]; then
+                    fast_format_timestamp "$bts" "" "1"
+                    printf "%s\0%s\0" "$FORMAT_RESULT" "$fn"
+#                    log "update with btime: $FORMAT_RESULT, $fn, $bts"
+
+                    fast_format_timestamp "$fs_mts" "" "1"
+                    printf "%s\0%s\0" "$FORMAT_RESULT" "$fn"
+#                    log "update mtime: $_mts_str, $fn, $mts"
+
+                    bts_updated=1
+                fi
+            else
+                if [ -n "$bts" ] && [ -n "$fs_bts" ] && [ "$bts" -lt "$fs_bts" ]; then
+                    fast_format_timestamp "$bts" "" "1"
+                    printf "%s\0%s\0" "$FORMAT_RESULT" "$fn"
+#                    log "update with btime: $FORMAT_RESULT, $fn, $bts"
+                    bts_updated=1
+                fi
+
+                if [ "$bts_updated" != "1" ] || [ "$mts" != "$bts" ]; then
+                    _mts_str=$(format_timestamp "$mts" "" "1")
+                    printf "%s\0%s\0" "$_mts_str" "$fn"
+#                    log "update mtime: $_mts_str, $fn, $mts"
+                fi
+            fi
+
+            if [ -n "$1" ] && [ -n "$bts" ] && [ "$bts_updated" != "1" ]; then
+                _bts_str=$(format_timestamp "$bts" "" "2")
+                printf "%s\0%s\0" "$_bts_str" "$fn" >> "$1"
+#                log "delay set-btime: $_bts_str, $fn, $bts"
             fi
         fi
     done
+}
+
+batch_touch_bts()
+{
+    if [ -s "$1" ]; then
+        n_count=$(cat < "$1" | tr '\0' "\n" | grep -c "")
+        log "batch touch bts $((n_count/2)) ... "
+        if [ "$PLATFORM" = 'linux' ]; then
+            log "not support on linux!"
+            return 1
+        else
+            cat < "$1" | xargs -0 -P 4 -L 50 -n 2 setfile -d || return 1
+            log "batch touch bts ok"
+        fi
+    fi
+
+    return 0
 }
 
 batch_touch()
@@ -617,27 +709,22 @@ batch_touch()
     if [ "$SCAN_BACKEND" = 'python' ]; then
         log "python touch ..."
         python_touch "$bts_tmp_file" || return 1
-        if [ "$PLATFORM" = 'macos' ]; then
-            cat < "$bts_tmp_file"
-            if [ -s "$bts_tmp_file" ]; then
-                cat < "$bts_tmp_file" | xargs -0 -L 100 -n 2 setfile -d || return 1
-            fi
-        fi
     else
         log "xargs touch ..."
         if [ "$PLATFORM" = 'linux' ]; then
-            pre_batch_touch "$bts_tmp_file" | xargs -0 -P 4 -n 2 sh -c 'touch -h -m -d "@$1" "$2"'
+            pre_batch_touch "$bts_tmp_file" | xargs -0 -P 4 -n 2 sh -c 'touch -h -m -d "@$1" "$2"' || return 1
         else
-            pre_batch_touch "$bts_tmp_file" | xargs -0 -P 4 -L 100 -n 2 touch -h -m -t
-            if [ -s "$bts_tmp_file" ]; then
-                cat < "$bts_tmp_file" | xargs -0 -L 100 -n 2 setfile -d || return 1
-            fi
+            pre_batch_touch "$bts_tmp_file" | xargs -0 -P 4 -L 50 -n 2 touch -h -m -t || return 1
         fi
     fi
 
-    rm -f "$bts_tmp_file"
+    if [ "$PLATFORM" = 'macos' ]; then
+        batch_touch_bts "$bts_tmp_file" || return 1
+    fi
 
-    cd - || return 1
+    [ -f "$bts_tmp_file" ] && rm -f "$bts_tmp_file"
+
+    cd - > /dev/null || return 1
 
     log "batch_touch ok"
 }
@@ -3177,10 +3264,10 @@ update_note_time_table()
                     else
                         if [ "$type" = 1 ]; then
                             note_mtime="$MTIME_RESULT"
-                            [ -z "$note_mtime" ] && echo "mtime note exists: $sfile, $cache_file" && return 1
+#                            [ -z "$note_mtime" ] && echo "mtime note exists: $sfile, $cache_file" && return 1
                         else
                             note_btime="$BTIME_RESULT"
-                            #the btime might be empty for a M
+#                            [ -z "$note_btime" ] && echo "btime note exists: $sfile, $cache_file" && return 1
                         fi
                     fi
                 fi
@@ -3294,7 +3381,7 @@ EOF
 
     if [ "$files_count" -lt $((commits_count * 10)) ]; then
         log "prebuild by $files_count files, for $commit ..."
-        ! prebuild_full_note_file_by_file "$tbl_file_3_commits" && print_n "$tbl_file_3_commits" > /tmp/3commits.txt && return 1
+        ! prebuild_full_note_file_by_file "$tbl_file_3_commits" && return 1
     else
         log "prebuild by $commits_count commits based on $latest_full_note, for $commit ..."
 
@@ -3625,7 +3712,9 @@ synchronize_file()
     ! set_file_mtime "$path" "$mts" && log "failed to synchronize mtime '$path'" && return 1
 
     if [ -n "$bts" ] && [ "$bts" != "$file_bts" ]; then
-        ! set_file_btime "$path" "$bts" && log "failed to synchronize btime '$path'" && return 1
+        if [ "$PLATFORM" = "macos" ]; then
+            ! set_file_btime "$path" "$bts" && log "failed to synchronize btime '$path'" && return 1
+        fi
     fi
 
     fast_format_timestamp "$mts"
@@ -3644,7 +3733,7 @@ exclude_status_files()
     (git_status_files | cut -c 4- | sed "s/^/$STX/" &&
       git_status_dirs | sed "s/^/$STX/" ) | LC_ALL=C sort > "$tmp_file"
 
-    log "exclude-status-files: $(cat "$tmp_file")"
+#    log "exclude-status-files: $(cat "$tmp_file")"
 
     LC_ALL=C join -t "$ETX" -a1 -o 1.1,1.2,1.3,2.1 - "$tmp_file" |
                 awk -F"$ETX" -v OFS="$ETX" -v ept_id="$empty_it" '{
@@ -3680,19 +3769,19 @@ on_head_moved()
 #    ! printf "%s\n" "$str" | index_is_valid "stage"  && echo "invalid stage note" && return 1
 
     ! preview_fs_time "HEAD" | LC_ALL=C sort | exclude_status_files "" |
-            LC_ALL=C join -t "$ETX" -o 1.1,1.2,1.3,2.2,1.5 "$full_note" - |
+            LC_ALL=C join -t "$ETX" -o 1.1,1.2,1.3,2.2,2.3,1.5 "$full_note" - |
                 awk -F"$ETX" -v OFS="$ETX" -v uct="$CFG_USE_COMMIT_TIME" '
                 {
                     note_mts=$2
                     if(note_mts=="" && uct=="1"){
-                        note_mts=$5
+                        note_mts=$6
                     }
 
                     if (note_mts!="" && $4 > note_mts) {
-                        print substr($1,2),note_mts,$3
+                        print substr($1,2),note_mts,$3,$4,$5
                     }
                 }
-                ' | batch_touch && echo "restore mtimes failed" && return 1
+                ' | batch_touch && echo "batch restore times failed" && return 1
 
     log "restore mtimes ok"
 
