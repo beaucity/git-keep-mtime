@@ -2927,20 +2927,20 @@ select_stage_files()
 
         case "$staged_flag" in
             D)
-                log "DELETE: $line"
+#                log "DELETE: $line"
                 print_n "$STX$file${ETX}D${ETX}" >> "$stage_file_temp"
                 ;;
             *)
                 if [ -f "$stage_file" ] && index_get_file_time "$STX$file" "$stage_file"; then
                     if [ -n "$newly_added_files" ] && print_n "$newly_added_files" | grep -Fxq "$file"; then
-                        log "RENEW: $line"
+#                        log "RENEW: $line"
                         printf "%s\0" "$file"
                     else
-                        log "REMAIN: $line, $MTIME_RESULT"
+#                        log "REMAIN: $line, $MTIME_RESULT"
                         print_n "$STX$file${ETX}$MTIME_RESULT${ETX}$BTIME_RESULT" >> "$stage_file_temp"
                     fi
                 else
-                    log "ADD: $line"
+#                    log "ADD: $line"
                     printf "%s\0" "$file"
                 fi
                 ;;
@@ -3897,7 +3897,7 @@ pre_commit()
     log "on prev commit: $stage_file"
     while IFS="$ETX" read -r file mtime btime
     do
-        log "staged file: $file, $mtime, $btime, $now_ts"
+#        log "staged file: $file, $mtime, $btime, $now_ts"
         if [ "$mtime" != "D" ]; then
             if [ -f "$full_note_file" ] && index_select_item_value 4 "$full_note_file" "$file"; then
                   if [ "$mtime" -lt "$now_ts" ]; then
@@ -3975,7 +3975,7 @@ post_clone()
 
     repo_dir=$(select_arg "$upstream_url" "$@")
     if [ -z "$repo_dir" ] ; then
-        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/).*\.git$' | cut -c 2- | sed 's/.git$//')
+        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]]*\.git$' | cut -c 2- | sed 's/.git$//')
     fi
     log "repo: $repo_dir"
 
