@@ -3970,14 +3970,14 @@ pre_rebase()
 
 post_clone()
 {
-    ! upstream_url=$(grep_arg '[^ ]+\.git$' "$@") && echo "unknown url" && return 0
+    ! upstream_url=$(grep_arg '(:|/)[^/]+[\.git]?$' "$@") && echo "unknown url" && return 0
     log "url: $upstream_url"
 
     repo_dir=$(select_arg "$upstream_url" "$@")
     if [ -z "$repo_dir" ] ; then
-        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]]*\.git$' | cut -c 2- | sed 's/.git$//')
+        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]+[\.git]?$' | cut -c 2- | sed 's/.git$//')
     fi
-    log "repo: $repo_dir"
+    echo "cd cloned-dir: $repo_dir"
 
     cd "$repo_dir" && init_path || return 1
 
