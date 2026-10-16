@@ -2040,6 +2040,12 @@ git_is_head()
     [ "$(git_rev_parse "$commit")" = "$(git_current_head)" ]
 }
 
+git_current_branch()
+{
+    
+    origin_git branch --show-current
+}
+
 git_current_head()
 {
     git_rev_parse HEAD
@@ -3617,6 +3623,16 @@ git_repo_root()
     origin_git rev-parse --show-toplevel 2>/dev/null
 }
 
+git_branch_remote_name()
+{
+    branch_name="$1"
+    if [ -z "$branch_name" ]; then
+        branch_name=$(git_current_branch) || return 1
+    fi
+
+    origin_git config --get branch."$branch_name".remote
+}
+
 git_repo_dir()
 {
     origin_git rev-parse --git-dir 2>/dev/null
@@ -3977,7 +3993,7 @@ post_clone()
     if [ -z "$repo_dir" ] ; then
         repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]+[\.git]?$' | cut -c 2- | sed 's/.git$//')
     fi
-    echo "cd cloned-dir: $repo_dir"
+    echo "cd cloned-dir: $repo_dir, remote: $REMOTE_NAME"
 
     cd "$repo_dir" && init_path || return 1
 
@@ -4413,7 +4429,7 @@ EOF
 post_push ()
 {
     ! origin_git push \
-                origin \
+                "$REMOTE_NAME" \
                 "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" && return 1 || return 0
 }
 
@@ -4423,7 +4439,7 @@ post_fetch()
 
     old_note_id="$(git_rev_parse "refs/notes/$NOTE_REF")"
 
-    if ! origin_git fetch origin "+refs/notes/$NOTE_REF:refs/notes/$NOTE_REF"; then
+    if ! origin_git fetch "$REMOTE_NAME" "+refs/notes/$NOTE_REF:refs/notes/$NOTE_REF"; then
         return 1
     fi
 
@@ -4487,8 +4503,9 @@ git_command_handler()
     [ -z "$cmd" ] && return 1
     ts_before=$(date +%s)
     case "$cmd" in
-        add|mv|rm|checkout|restore)
+        add|mv|rm|checkout|restore|switch)
             working_files_before=$(git_status_files | grep '^.M' | cut -c 4-)
+            old_branch=$(git_current_branch)
             ;;
         commit)
             pre_commit || return 1
@@ -4614,6 +4631,9 @@ git_command_handler()
             ;;
         checkout)
             log "post $cmd ..."
+
+            branch_name="$(git_current_branch)" && [ "$old_branch" != "$branch_name" ] && REMOTE_NAME=$(git_branch_remote_name "$branch_name")
+
             source=$(select_arg "checkout" "$@")
             [ -z "$source" ] && echo "unknown branch" && return 1
 
@@ -4630,10 +4650,14 @@ git_command_handler()
                 #checkout path may be a dir, and they had moved into the stage
                 ! post_checkout_files "$working_files_before" "$ts_before" "$source" && return 1
             fi
+
             log "post $cmd ok"
             ;;
         switch)
             log "post $cmd ..."
+
+            branch_name="$(git_current_branch)" && [ "$old_branch" != "$branch_name" ] && REMOTE_NAME=$(git_branch_remote_name "$branch_name")
+
             if [ "$(git_current_head)" != "$old_commit_id" ]; then
                 on_head_moved || return 1
             fi
@@ -4660,8 +4684,12 @@ git_command_handler()
             ;;
         clone)
             log "post $cmd ..."
+
+            branch_name="$(git_current_branch)"
+            REMOTE_NAME=$(git_branch_remote_name "$branch_name")
+
             if ! post_clone "$@"; then
-                ! origin_git ls-remote --exit-code origin "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
                 return 1
             fi
             log "post $cmd ok"
@@ -4669,7 +4697,7 @@ git_command_handler()
         push)
             log "post $cmd ..."
             if ! post_push; then
-                ! origin_git ls-remote --exit-code origin "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
                 echo "Git push succeeded but timestamp note push failed." && return 1
             fi
             log "post $cmd ok"
@@ -4677,7 +4705,7 @@ git_command_handler()
         fetch)
             log "post $cmd ..."
             if ! post_fetch "$old_commit_id"; then
-                ! origin_git ls-remote --exit-code origin "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
                 echo "Git pull succeeded but timestamp note fetch failed." && return 1
             fi
             log "post $cmd ok"
@@ -4685,7 +4713,7 @@ git_command_handler()
         pull)
             log "post $cmd ..."
             if ! post_pull "$old_commit_id"; then
-                ! origin_git ls-remote --exit-code origin "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
                 echo "Git pull succeeded but timestamp note pull failed." && return 1
             fi
             log "post $cmd ok"
@@ -4705,6 +4733,8 @@ init_path()
     CUR_DIR=$(pwd -P)
     REPO_ROOT=$(git_repo_root)
     GIT_DIR=$(git_repo_dir)
+    REMOTE_NAME=$(git_branch_remote_name "")
+
     [ "$REPO_ROOT" = "$CUR_DIR" ] && SUB_DIR= || SUB_DIR=${CUR_DIR#*"$REPO_ROOT/"}/
     find_command "look" > /dev/null && IS_LOOK_INSTALLED=1 || IS_LOOK_INSTALLED=0
 }
