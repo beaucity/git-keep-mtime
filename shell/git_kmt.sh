@@ -3266,10 +3266,10 @@ update_note_time_table()
                 if [ -f "$cache_file" ]; then
                     if ! index_get_file_time "$sfile" "$cache_file"; then
                         if [ -f "${sfile#*"$STX"}" ]; then
-                            log "file missing in note, type: $type, file: '$sfile', note-file: $cache_file"
-                            return 1
+                            echo "file time note missing, type: $type, file: '$sfile', note-file: $cache_file" >&2
+#                            return 1
                         elif [ -d "${sfile#*"$STX"}" ]; then
-                            log "dir missing in note, type: $type, file: '$sfile', note-file: $cache_file"
+                            echo "dir time note missing, type: $type, file: '$sfile', note-file: $cache_file" >&2
                         fi
                     else
                         if [ "$type" = 1 ]; then
