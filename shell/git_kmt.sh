@@ -17,7 +17,7 @@
 #      are not handled by KMT to that executable.
 #
 #  Version:
-#      0.4.5
+#      0.4.6
 #
 #  Storage model:
 #      git notes --ref=kmt/mtime <commit>
@@ -30,7 +30,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.4.5'
+KMT_VERSION='0.4.6'
 
 META_NAME="time-notes"
 
@@ -3986,12 +3986,12 @@ pre_rebase()
 
 post_clone()
 {
-    ! upstream_url=$(grep_arg '(:|/)[^/]+[\.git]?$' "$@") && echo "unknown url" && return 0
+    ! upstream_url=$(grep_arg '(:|/)[^/]+$' "$@") && echo "unknown url" && return 0
     log "url: $upstream_url"
 
     repo_dir=$(select_arg "$upstream_url" "$@")
     if [ -z "$repo_dir" ] ; then
-        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]+[\.git]?$' | cut -c 2- | sed 's/.git$//')
+        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]+$' | cut -c 2- | cut -d '.' -f 1)
     fi
     echo "cd cloned-dir: $repo_dir, remote: $REMOTE_NAME"
 
