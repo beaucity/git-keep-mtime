@@ -35,10 +35,15 @@ KMT_VERSION='0.4.6'
 META_NAME="time-notes"
 
 NOTE_REF="kmt/mtime"
+NOTE_BACKUP_REF="refs/kmt/backup/notes-before-fetch"
+NOTE_CONFLICT_POLICY=${NOTE_CONFLICT_POLICY:-local}
 
-STX=$(printf '\x02')
-ETX=$(printf '\x03')
-EOT=$(printf '\x04')
+notes_backup_prepared=0
+notes_backup_id=
+
+STX=$(printf '\002')
+ETX=$(printf '\003')
+EOT=$(printf '\004')
 
 CFG_USE_COMMIT_TIME=1
 CUR_DIR=$(pwd -P)
@@ -54,15 +59,19 @@ IS_LOOK_INSTALLED=0
 
 PLATFORM=""
 
-#FF=$(printf '\x0C')
-SO=$(printf '\x0E')
+#FF=$(printf '\014')
+SO=$(printf '\016')
 ELF="$SO"
 LF="
 "
 
-KMT_DEBUG_LOG_FILE=
+KMT_DEBUG_LOG_FILE=''
 ENABLE_OID_VERIFY=0
 
+XARGS_P="-P 4"
+XARGS_L="-L 50"
+
+TZ_HM=
 TZ_SECONDS=
 
 last_log_ts=
@@ -92,7 +101,7 @@ log()
             printf "%s\n" "[ $$ + $tsd] $*" >&2
             ;;
         *)
-            printf "%s\n" "[ $$ + $tsd] $*" >> "$KMT_DEBUG_LOG_FILE"
+            printf "%s\n" "[ $$ + $tsd] $*" >>"$KMT_DEBUG_LOG_FILE"
             ;;
     esac
 
@@ -130,6 +139,16 @@ full_path_name()
     printf "%s\n" "$str"
 
     return 0
+}
+
+make_temp_file()
+{
+    mktemp "${TMPDIR:-/tmp/}$1.XXXXXX"
+}
+
+make_temp_dir()
+{
+    mktemp -d "${TMPDIR:-/tmp/}$1.XXXXXX"
 }
 
 float_diff() {
@@ -210,6 +229,9 @@ detect_platform()
             ;;
 
     esac
+
+    echo "" | xargs -P 4 ls > /dev/null 2>/dev/null && XARGS_P="-P 4" || XARGS_P=
+    echo "" | xargs -L 50 ls > /dev/null 2>/dev/null && XARGS_L="-L 50" || XARGS_L=
 }
 
 get_url_timestamp() {
@@ -251,7 +273,7 @@ detect_time_offset()
 $dirs
 EOF
 
-    for web_server in "$url" "https://www.baidu.com" "http://www.google.com";
+    for web_server in "$url" "";
     do
         [ -z "$web_server" ] && continue
 
@@ -279,12 +301,14 @@ are you sure to continue? (y/N)"
 
 detect_time_zone()
 {
-    ! offset_str=$(date +%z) && echo "Get timezone failed." && return 1
+    ! TZ_HM=$(date +%z) && echo "Get timezone failed." && return 1
 
-    sign=$(echo "$offset_str" | cut -c 1-1)
-    hh=$(echo "$offset_str" | cut -c 2-3 | sed 's/^0//' )
+    TZ_HM=$(printf '%s' "$TZ_HM" | tr -d ':')
 
-    mm=$(echo "$offset_str" | cut -c 4-5 | sed 's/^0//' )
+    sign=$(echo "$TZ_HM" | cut -c 1-1)
+    hh=$(echo "$TZ_HM" | cut -c 2-3 | sed 's/^0//' )
+
+    mm=$(echo "$TZ_HM" | cut -c 4-5 | sed 's/^0//' )
 
     TZ_SECONDS=$((hh*3600 + mm*60))
     [ "$sign" = "-" ] && TZ_SECONDS=$((-TZ_SECONDS))
@@ -316,23 +340,18 @@ is_timestamp()
 #    echo "$1" | grep -Eq '^[0-9]+$'
 }
 
-format_timestamp()
-{
-    fast_format_timestamp "$@"
-    echo "$FORMAT_RESULT"
-}
-
 fast_format_timestamp() {
     FORMAT_RESULT=
     __ts=$1
 #    [ -n "$1" ] || return 1
     is_timestamp "$1" || return 1
 
-    tz=${2:-"$TZ_SECONDS"}
+    mode="${2:-0}"
 
-    __ts=$((__ts + tz))
-
-    mode=$3
+    if [ "$mode" = "0" ]; then
+        tz=${3:-"$TZ_SECONDS"}
+        __ts=$((__ts + (tz) ))
+    fi
 
     days=$((__ts / 86400))
     sod=$((__ts % 86400))
@@ -387,55 +406,19 @@ fast_format_timestamp() {
         2)
           FORMAT_RESULT="${month}/${day}/${year} ${hour}:${minute}:${second}"
           ;;
+        3)
+          FORMAT_RESULT="${year}-${month}-${day}T${hour}:${minute}:${second}Z"
+          ;;
         *)
-          FORMAT_RESULT="${year}-${month}-${day} ${hour}:${minute}:${second}"
+          FORMAT_RESULT="${year}-${month}-${day} ${hour}:${minute}:${second} $TZ_HM"
           ;;
     esac
 }
 
-format_timestamp_by_date()
+format_timestamp()
 {
-    date -r "$1" "+%Y-%m-%d %H:%M:%S"
-}
-
-format_timestamp_old() {
-#    log "ts: $1, tz: $TZ_SECONDS"
-    [ -z "$1" ] && return 1
-#    echo "$1"
-#    return 0
-#    date -r "$1" "+%Y-%m-%d %H:%M:%S" && return 0
-
-    ! is_timestamp "$1" && return 1
-
-
-    ts=$(($1 + ${2:-"$TZ_SECONDS"}))
-    d=$((ts / 86400 + 1))
-    s=$((ts % 86400))
-    [ "$s" -lt 0 ] && s=$((s + 86400)) && d=$((d - 1))
-
-    y=1970
-    while true; do
-        leap=0
-        [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; } && leap=1
-        days=365; [ "$leap" -eq 1 ] && days=366
-        [ "$d" -gt "$days" ] || break
-        d=$((d - days)); y=$((y + 1))
-    done
-
-    m=1
-    while true; do
-        leap=0
-        [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; } && leap=1
-        case "$m" in
-            1|3|5|7|8|10|12) dm=31 ;;
-            4|6|9|11) dm=30 ;;
-            2) dm=$((leap ? 29 : 28)) ;;
-        esac
-        [ "$d" -gt "$dm" ] || break
-        d=$((d - dm)); m=$((m + 1))
-    done
-
-    printf "%04d-%02d-%02d %02d:%02d:%02d" "$y" "$m" "$d" $((s/3600)) $(((s%3600)/60)) $((s%60))
+    fast_format_timestamp "$@"
+    echo "$FORMAT_RESULT"
 }
 
 get_file_mtime()
@@ -487,9 +470,17 @@ set_file_mtime()
             ;;
 
         macos)
-            fast_format_timestamp "$timestamp" "" "1"
-#            touch -m -t "$(date -r "$timestamp" "+%Y%m%d%H%M.%S")" "$file_to_set" || return 1
-            touch -m -t "$FORMAT_RESULT" "$file_to_set" || return 1
+            #it is hard to judge EST(UTC-5) or EDT(UTC-4) when TZ=America/New_York, so use touch -d with utc-time
+            fast_format_timestamp "$timestamp" "3"
+            touch -m -d "$FORMAT_RESULT" "$file_to_set" 2>/dev/null && return 0
+
+            log "touch -d failed, try touch -t with TZ=UTC, $file_to_set, $FORMAT_RESULT"
+
+            fast_format_timestamp "$timestamp" "1"
+            TZ=UTC touch -m -t "$FORMAT_RESULT" "$file_to_set" 2>/dev/null && return 0
+
+            return 1
+
             ;;
 
         *)
@@ -508,8 +499,8 @@ set_file_btime()
           return 1
           ;;
         macos)
-          fast_format_timestamp "$2" "" "2"
-          setfile -d "$FORMAT_RESULT" "$1" || return 1
+          fast_format_timestamp "$2" "2"
+          TZ=UTC setfile -d "$FORMAT_RESULT" "$1" || return 1
           ;;
     esac
     return 0
@@ -539,8 +530,8 @@ get_timestamp()
 #     utime(btime)
 #     utime(mtime)
 #else
-#    ouput to bts_temp_file
-
+#    write to bts_temp_file for setfile later
+#
 python_touch()
 {
     cmd=$(find_command "python3") || cmd=$(find_command "python")
@@ -548,6 +539,8 @@ python_touch()
     "$cmd" -c "
 import os, sys
 from datetime import datetime, timezone
+
+sys.stderr.write('python_touch> start...\n')
 
 buf = getattr(sys.stdin, 'buffer', sys.stdin)
 e = 0
@@ -602,34 +595,34 @@ for line in buf:
             if i_bts is not None and i_fs_bts is not None and i_bts < i_fs_bts and i_fs_mts is not None:
                 atime = os.path.getatime(p)
                 os.utime(p, (i_bts, i_bts), follow_symlinks=False)
-#               sys.stderr.write('utime: %s, %d\n' % (p,i_bts))
+                sys.stderr.write('python_touch utime: %s, %d\n' % (p,i_bts))
                 os.utime(p, (atime, i_fs_mts), follow_symlinks=False)
-#               sys.stderr.write('utime: %s, %d\n' % (p,i_fs_mts))
+                sys.stderr.write('python_touch>utime: %s, %d\n' % (p,i_fs_mts))
                 bts_updated=True
         else:
             if i_bts is not None and i_fs_bts is not None and i_bts < i_fs_bts:
                 os.utime(p, (i_bts, i_bts), follow_symlinks=False)
-#               sys.stderr.write('utime: %s, %d\n' % (p,i_bts))
+                sys.stderr.write('python_touch utime: %s, %d\n' % (p,i_bts))
                 bts_updated=True
 
             if not bts_updated or i_mts != i_bts:
                 os.utime(p, (i_mts, i_mts), follow_symlinks=False)
-#               sys.stderr.write('utime: %s, %d\n' % (p,i_mts))
+                sys.stderr.write('python_touch utime: %s, %d\n' % (p,i_mts))
 
         if i_bts is not None and not bts_updated:
-            formatted = datetime.fromtimestamp(i_bts).strftime('%m/%d/%Y %H:%M:%S')
+            formatted = datetime.fromtimestamp(i_bts, timezone.utc).strftime('%m/%d/%Y %H:%M:%S')
             bts_file.write('%s\x00%s\x00'%(formatted, p))
-            sys.stderr.write('delay set-btime: %s, %s, %d\n' % (formatted, p, i_bts))
+            sys.stderr.write('python_touch delay set-btime: %s, %s, %d\n' % (formatted, p, i_bts))
 
     except Exception as x:
-        sys.stderr.write('%r: %s\n' % (name, x))
+        sys.stderr.write('python_touch %r: %s\n' % (name, x))
         e += 1
 
 if bts_file is not None:
     bts_file.close()
 
 sys.exit(1 if e else 0)
-"
+" 2>>"${KMT_DEBUG_LOG_FILE:-/dev/null}"
 }
 
 pre_batch_touch()
@@ -649,11 +642,11 @@ pre_batch_touch()
 
             if [ -z "$mts" ]; then
                 if [ -n "$bts" ] && [ -n "$fs_bts" ] && [ "$bts" -lt "$fs_bts" ] && [ -n "$fs_mts" ]; then
-                    fast_format_timestamp "$bts" "" "1"
+                    fast_format_timestamp "$bts" "3"
                     printf "%s\0%s\0" "$FORMAT_RESULT" "$fn"
 #                    log "update with btime: $FORMAT_RESULT, $fn, $bts"
 
-                    fast_format_timestamp "$fs_mts" "" "1"
+                    fast_format_timestamp "$fs_mts" "3"
                     printf "%s\0%s\0" "$FORMAT_RESULT" "$fn"
 #                    log "update mtime: $_mts_str, $fn, $mts"
 
@@ -661,21 +654,21 @@ pre_batch_touch()
                 fi
             else
                 if [ -n "$bts" ] && [ -n "$fs_bts" ] && [ "$bts" -lt "$fs_bts" ]; then
-                    fast_format_timestamp "$bts" "" "1"
+                    fast_format_timestamp "$bts" "3"
                     printf "%s\0%s\0" "$FORMAT_RESULT" "$fn"
 #                    log "update with btime: $FORMAT_RESULT, $fn, $bts"
                     bts_updated=1
                 fi
 
                 if [ "$bts_updated" != "1" ] || [ "$mts" != "$bts" ]; then
-                    _mts_str=$(format_timestamp "$mts" "" "1")
+                    _mts_str=$(format_timestamp "$mts" "3")
                     printf "%s\0%s\0" "$_mts_str" "$fn"
 #                    log "update mtime: $_mts_str, $fn, $mts"
                 fi
             fi
 
             if [ -n "$1" ] && [ -n "$bts" ] && [ "$bts_updated" != "1" ]; then
-                _bts_str=$(format_timestamp "$bts" "" "2")
+                _bts_str=$(format_timestamp "$bts" "2")
                 printf "%s\0%s\0" "$_bts_str" "$fn" >> "$1"
 #                log "delay set-btime: $_bts_str, $fn, $bts"
             fi
@@ -692,7 +685,7 @@ batch_touch_bts()
             log "not support on linux!"
             return 1
         else
-            cat < "$1" | xargs -0 -P 4 -L 50 -n 2 setfile -d || return 1
+            ! cat < "$1" | TZ=UTC xargs -0 $XARGS_P $XARGS_L -n 2 setfile -d && log 'set file failed' && return 1
             log "batch touch bts ok"
         fi
     fi
@@ -704,7 +697,7 @@ batch_touch()
 {
     cd "$REPO_ROOT" || return 1
 
-    bts_tmp_file="${TMPDIR:-/tmp}/bts_tmp_file.$$"
+    bts_tmp_file="$(make_temp_file "kmt_bts_tmp_file")" || return 1
 
     if [ "$SCAN_BACKEND" = 'python' ]; then
         log "python touch ..."
@@ -712,9 +705,9 @@ batch_touch()
     else
         log "xargs touch ..."
         if [ "$PLATFORM" = 'linux' ]; then
-            pre_batch_touch "$bts_tmp_file" | xargs -0 -P 4 -n 2 sh -c 'touch -h -m -d "@$1" "$2"' || return 1
+            pre_batch_touch "$bts_tmp_file" | xargs -0 $XARGS_P -n 2 sh -c 'touch -h -m -d "@$1" "$2"' || return 1
         else
-            pre_batch_touch "$bts_tmp_file" | xargs -0 -P 4 -L 50 -n 2 touch -h -m -t || return 1
+            pre_batch_touch "$bts_tmp_file" | xargs -0 $XARGS_P $XARGS_L -n 2 touch -h -m -d || return 1
         fi
     fi
 
@@ -983,8 +976,8 @@ join_str()
     shift
     shift
 
-    tmp_file1="${TMPDIR:-/tmp}/kmt_join_tbl1.$$"
-    tmp_file2="${TMPDIR:-/tmp}/kmt_join_tbl2.$$"
+    tmp_file1="$(make_temp_file "kmt_join_tbl1")" || return 1
+    tmp_file2="$(make_temp_file "kmt_join_tbl2")" || return 1
 
     print_n "$str1" | LC_ALL=C sort > "$tmp_file1"
     print_n "$str2" | LC_ALL=C sort > "$tmp_file2"
@@ -1025,6 +1018,80 @@ ORIGIN_APP=
 show_version()
 {
     echo "$KMT_FULL_NAME. Version: ${KMT_VERSION}"
+}
+
+##############################################################################
+# Dependency Check
+##############################################################################
+
+# Check that all external commands required by the app are available.
+# Returns 0 if all required commands exist, 1 otherwise.
+kmt_check_dependencies()
+{
+    missing=
+    optional_missing=
+
+    # ---- Required commands (core functionality depends on them) ----
+    for cmd in \
+        "$APP" uname date stat touch realpath basename dirname pwd \
+        mkdir cp chmod mv ln rm cat sed grep cut sort tr awk \
+        head which xargs join mktemp readlink ls
+    do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing="$missing $cmd"
+        fi
+    done
+
+    if [ -n "$missing" ]; then
+        echo "Error: required command(s) not found:$missing" >&2
+        echo "Please install them before running $KMT_FULL_NAME." >&2
+        return 1
+    fi
+
+    # ---- Optional commands (features degrade gracefully if absent) ----
+    for cmd in python3 python python2 curl look setfile
+    do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            optional_missing="$optional_missing $cmd"
+        fi
+    done
+
+    if [ -n "$optional_missing" ]; then
+        echo "Note: optional command(s) not found:$optional_missing" >&2
+        echo "  Related features may be degraded or unavailable." >&2
+    fi
+
+    # ---- Platform-specific capability checks ----
+    case "$(uname -s)" in
+        Linux*)
+            if ! stat -c %Y . >/dev/null 2>&1; then
+                echo "Warning: 'stat' does not support -c (GNU stat expected); timestamps may be broken." >&2
+            fi
+            if ! date -d "@0" +%s >/dev/null 2>&1; then
+                echo "Warning: 'date' does not support -d (GNU date expected); timestamps may be broken." >&2
+            fi
+            ;;
+        Darwin*)
+            if ! stat -f %m . >/dev/null 2>&1; then
+                echo "Warning: 'stat' does not support -f (BSD stat expected); timestamps may be broken." >&2
+            fi
+            if ! command -v setfile >/dev/null 2>&1; then
+                echo "Note: 'setfile' not found; birth time (btime) cannot be restored on macOS." >&2
+            fi
+            ;;
+        *)
+            echo "Error: unsupported platform: $(uname -s)" >&2
+            return 1
+            ;;
+    esac
+
+    # ---- Verify join/awk are usable in the way the script expects ----
+    if ! str=$(printf '1 a\n' | join -a1 -t ' ' - /dev/null 2>&1); then
+        echo "Warning: 'join' may behave differently than expected; table merging could fail." >&2
+    fi
+
+    echo "Dependency check passed."
+    return 0
 }
 
 ##############################################################################
@@ -1166,6 +1233,8 @@ check_executable_when_moved()
 kmt_install()
 {
     str=$("$APP" kmt-version 2>/dev/null) && echo "$str is already installed." && return 1
+
+    kmt_check_dependencies || return 1
 
     ! orig_app_path=$(find_command "$APP") && echo "find $APP failed" &&  return 1
 
@@ -1315,6 +1384,8 @@ kmt_upgrade()
 {
     [ -z "$APP" ] && echo "invalid app" && return 1
 
+    kmt_check_dependencies || return 1
+
     if str=$("$APP" kmt-version 2>/dev/null); then
         echo "$str is already installed, uninstall it ..."
 
@@ -1346,7 +1417,7 @@ kmt_upgrade()
 # KMT-UI
 ##############################################################################
 
-SEP=$(printf '\x03')
+SEP=$(printf '\003')
 
 auto_set_kmt_scan_backend()
 {
@@ -1360,20 +1431,24 @@ auto_set_kmt_scan_backend()
     return 0
 }
 
-detect_conf()
+detect_kmt_conf()
 {
-    if ! app_entry_path=$(find_command "$APP"); then
-        echo "Original $APP executable not found."
-        return 1
+    if ! app_kmt_path=$(find_command "$APP_KMT"); then
+        echo "Original $APP_KMT executable not found."
+        return 0
     fi
 
-    app_kmt_conf="$(dirname "$app_entry_path")/$APP_KMT.conf"
+    app_kmt_path="$(realpath "$app_kmt_path")"
+
+    [ -L "$app_kmt_path" ] && app_kmt_path="$(readlink "$app_kmt_path")"
+
+    app_kmt_conf="$(dirname "$app_kmt_path")/$APP_KMT.conf"
 
     find_in_conf()
     {
-        key="$1"
-        file="$2"
-        grep -o "^${key}:\s*.*" "$file" | sed "s/${key}: *//"
+        _key="$1"
+        _file="$2"
+        grep -o "^${_key}\s*.*" "$_file" | sed "s/${_key} *//"
     }
 
     if [ -f "$app_kmt_conf" ]; then
@@ -1454,9 +1529,9 @@ EOF
 batch_stat()
 {
     if [ "$PLATFORM" = 'linux' ]; then
-        xargs -0 -L 100 stat -c "%n$SEP%Y"
+        xargs -0 XARGS_P $XARGS_L stat -c "%n$SEP%Y"
     else
-        xargs -0 -L 100 stat -f "%N$SEP%m"
+        xargs -0 XARGS_P $XARGS_L stat -f "%N$SEP%m"
     fi
 }
 
@@ -2011,10 +2086,10 @@ main()
         ;;
     esac
 
+    ! detect_kmt_conf ||
     ! detect_platform ||
     ! detect_time_zone ||
     ! detect_original_app ||
-    ! detect_conf ||
     ! auto_set_kmt_scan_backend && return 1
 
     dispatch "$@"
@@ -2324,7 +2399,8 @@ git_3_commits_of_dirs()
     path="${2:-"$REPO_ROOT"}"
     ofs=${3:-"$ETX"}
 
-    fn_dirs="${TMPDIR:-/tmp}/kmt-dirs.txt.$$"
+#    fn_dirs="${TMPDIR:-/tmp}/kmt-dirs.txt.$$"
+    fn_dirs=$(make_temp_file "kmt-dirs") || return 1
 
     if [ -z "$2" ] || [ "$2" = "." ]; then
         printf '.%s' "$EOT" > "$fn_dirs"
@@ -2597,8 +2673,8 @@ git_3_commits_of_files()
 {
     commit="$1"
     rfile="$2"
-    shift
-    shift
+    [ $# -gt 0 ] && shift
+    [ $# -gt 0 ] && shift
     if [ -f "$REPO_ROOT/$rfile" ]; then
         log "get 3 commits of files: $rfile ..."
         git_3_commits_of_files_only "$commit" "${rfile#*"${SUB_DIR}"}" "$@" || return 1
@@ -2755,11 +2831,20 @@ index_encode_inline()
 index_file_encode_inline()
 {
     file="$1"
-    ! cat < "$file" | index_encode_inline > "$file.$$" && return 1
+    tmp_file="$(make_temp_file "kmt_encoded")" || return 1
+
+    cat < "$file" | index_encode_inline > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
 
     ts=$(get_file_mtime "$file")
-    set_file_mtime "$file.$$" "$ts" || return 1
-    mv -f "$file.$$" "$file" || return 1
+    set_file_mtime "$tmp_file" "$ts" || {
+      rm -f "$tmp_file"
+      return 1
+    }
+
+    mv -f "$tmp_file" "$file" || return 1
 
     return 0
 }
@@ -2849,7 +2934,7 @@ index_select_item_value()
 
     index_item_value_in_line "$item_id" "$FOUND_LINE" || return 1
 
-    return 1
+    return 0
 }
 
 index_get_file_time()
@@ -2869,6 +2954,15 @@ index_get_file_time()
 #    log "line: $FOUND_LINE, $MTIME_RESULT, $BTIME_RESULT"
 
     return 0
+}
+
+index_is_all_files_empty()
+{
+    if [ -z "$1" ]; then
+        ! grep -Ev "^${STX}.*${ETX}[D]?${ETX}$"
+    else
+        ! grep -Ev "^${STX}.*${ETX}[D]?${ETX}$" "$1"
+    fi
 }
 
 index_is_valid_schema()
@@ -2909,7 +3003,7 @@ index_is_valid()
             }
             prev=$1
             print $0
-        }' $2) && print_n "$str" && return 1
+        }' "$2") && print_n "$str" && return 1
 
     print_n "$str" | index_is_valid_schema "$1"
 }
@@ -2919,9 +3013,9 @@ select_stage_files()
     newly_added_files="$1"
     head_commit="$2"
     status_filter="$3"
+    stage_file_temp="$4"
 
     stage_file=$(index_get_file "$head_commit" "stage")
-    stage_file_temp="$stage_file.$$"
 
     while IFS= read -r line
     do
@@ -2979,18 +3073,15 @@ refresh_stage_note()
 
     stage_file=$(index_get_file "$head_commit" "stage")
 
-    stage_file_temp="$stage_file.$$"
-
-    [ -f "$stage_file_temp" ] && rm -f "$stage_file_temp"
-
     if [ -n "$status_files" ]; then
+        stage_file_temp="$(make_temp_file "kmt_temp_stage_file")" || return 1
         full_note_file=$(index_get_file "$head_commit" "full")
         if [ -f "$full_note_file" ]; then
-            print_n "$status_files" | select_stage_files "$newly_added_files" "$head_commit" "" | pipe_inline_decode | batch_stat_mtime_btime>> "$stage_file_temp" || return 1
+            print_n "$status_files" | select_stage_files "$newly_added_files" "$head_commit" "" "$stage_file_temp" | pipe_inline_decode | batch_stat_mtime_btime >> "$stage_file_temp" || return 1
         else
-            print_n "$status_files" | select_stage_files "$newly_added_files" "$head_commit" "A" | pipe_inline_decode | batch_stat_mtime_btime >> "$stage_file_temp"
-            print_n "$status_files" | select_stage_files "$newly_added_files" "$head_commit" "M"| pipe_inline_decode | batch_stat_mtime_empty >> "$stage_file_temp"
-            print_n "$status_files" | select_stage_files "$newly_added_files" "$head_commit" "D"
+            print_n "$status_files" | select_stage_files "$newly_added_files" "$head_commit" "A" "$stage_file_temp" | pipe_inline_decode | batch_stat_mtime_btime >> "$stage_file_temp"
+            print_n "$status_files" | select_stage_files "$newly_added_files" "$head_commit" "M" "$stage_file_temp" | pipe_inline_decode | batch_stat_mtime_empty >> "$stage_file_temp"
+            print_n "$status_files" | select_stage_files "$newly_added_files" "$head_commit" "D" "$stage_file_temp"
         fi
 
         #complete the dirs(added, modified and deleted)
@@ -3052,22 +3143,23 @@ refresh_stage_note()
         fi
 
         if [ -s "$stage_file_temp" ]; then
-            cat < "$stage_file_temp" | LC_ALL=C sort > "$stage_file"
+            LC_ALL=C sort "$stage_file_temp" > "$stage_file"
+#            log "stage temp: $(cat <"$stage_file_temp")"
+#            log "stage: $(cat <"$stage_file")"
+
+            rm -f "$stage_file_temp" || return 1
 
             last_ts=$(awk -F"$ETX" 'BEGIN {max = 0} $2!="D" && $2 > max {max = $2} END {print max}' "$stage_file")
 
             ! set_file_mtime "$stage_file" "$last_ts" && return 1
 
-            ! rm -f "$stage_file_temp" && return 1
-
             ! index_is_valid "stage" "$stage_file" && echo "invalid content in stage file: $stage_file" && return 1
         else
-            mv -f "$stage_file_temp" "$stage_file"
+            rm -f "$stage_file_temp" || return 1
         fi
 
     else
         [ -f "$stage_file" ] && rm -f "$stage_file"
-#        touch "$stage_file"
     fi
 
     log "refresh_stage_note ok"
@@ -3310,8 +3402,7 @@ prebuild_full_note_commit_by_commit()
     commit="$1"
     commits_to_merge="$2"
     latest_full_note="$3"
-
-    full_note_merging="$(index_get_file "$commit" "merging").$$"
+    full_note_merging="$4"
 
     if [ -n "$latest_full_note" ]; then
         cp "$latest_full_note" "$full_note_merging"
@@ -3336,7 +3427,6 @@ prebuild_full_note_commit_by_commit()
                     ;;
                 *)
                     log "merge failed: $str"
-                    rm -f "$full_note_merging"
                     return 1
                     ;;
             esac
@@ -3344,8 +3434,6 @@ prebuild_full_note_commit_by_commit()
         done << EOF
 $commits_to_merge
 EOF
-
-    cat "$full_note_merging" && rm -f "$full_note_merging"
 
     return 0
 }
@@ -3394,8 +3482,15 @@ EOF
         ! prebuild_full_note_file_by_file "$tbl_file_3_commits" && return 1
     else
         log "prebuild by $commits_count commits based on $latest_full_note, for $commit ..."
+        full_note_merging="$(make_temp_file "kmt_full_note_merging")" || return 1
 
-        ! prebuild_full_note_commit_by_commit "$commit" "$commits_to_merge" "$latest_full_note" && return 1
+        if ! prebuild_full_note_commit_by_commit "$commit" "$commits_to_merge" "$latest_full_note" "$full_note_merging"; then
+            rm -f "$full_note_merging"
+            return 1
+        fi
+
+        cat "$full_note_merging"
+        rm -f "$full_note_merging"
     fi
 
     log "prebuild full note ok $commit"
@@ -3424,16 +3519,18 @@ refresh_later_full_notes()
 
         log "update full note with commit note, $commit_id, $idx_file"
 
+        idx_file_new="$(make_temp_file "kmt_idx_file_new")" || return 1
+
         ! print_n "$delta_note" | LC_ALL=C join -t "$ETX" -a1 -o 1.1,1.2,1.3,1.4,1.5,1.6,1.7,2.1,2.2,2.3 "$idx_file" - |
-            awk -F"$ETX" -v OFS="$ETX" -v ci="$commit_id" '{print $1,($4==ci)?$9:$2,($3=="")?$10:$3,$4,$5,$6,$7}' > "$idx_file.new.$$" &&
+            awk -F"$ETX" -v OFS="$ETX" -v ci="$commit_id" '{print $1,($4==ci)?$9:$2,($3=="")?$10:$3,$4,$5,$6,$7}' > "$idx_file_new" &&
             return 1
 
-        ! index_is_valid "full" "$idx_file.new.$$" && echo "invalid merged full index file: $idx_file.new.$$" && return 1
+        ! index_is_valid "full" "$idx_file_new" && echo "invalid merged full index file: $idx_file_new" && return 1
 
         full_note_file_ts=$(get_file_mtime "$idx_file") || return 1
-        ! set_file_mtime "$idx_file.new.$$" "$full_note_file_ts" && return 1
+        ! set_file_mtime "$idx_file_new" "$full_note_file_ts" && return 1
 
-        ! mv "$idx_file.new.$$" "$idx_file" && return 1
+        ! mv "$idx_file_new" "$idx_file" && return 1
 
         log "update full note ok: $idx_file"
 
@@ -3446,45 +3543,43 @@ rebuild_commit_note()
 {
     commit=${1:-HEAD}
 
-#    if git_is_head "$commit"; then
-#        ! post_commit && echo "post commit failed" && return 1
-#        log "post commit ok $commit"
-#        return 0
-#    fi
-
     if ! note=$(prebuild_commit_note "$commit"); then
         echo "$note"
         echo "build note failed"
         return 1
     fi
 
-    ! note_file=$(mktemp "${TMPDIR:-/tmp/}git-kmt-note.$$") && echo "mktemp failed" && return 1
+    note_temp_file="$(make_temp_file "kmt_git-kmt-note")" || return 1
 
-    print_n "$note" | LC_ALL=C sort > "$note_file"
+    print_n "$note" | LC_ALL=C sort > "$note_temp_file"
 
-    ! index_is_valid "delta" "$note_file" && echo "invalid content in note file: $note_file" && return 1
+    ! index_is_valid "delta" "$note_temp_file" && echo "invalid content in note file: $note_temp_file" && return 1
 
-#    log "$note_file" && return 1
+#    log "$note_temp_file" && return 1
 
     if git_is_head "$commit"; then
-        ! post_commit "$note_file" && echo "post commit failed" && return 1
+        if ! post_commit "$note_temp_file"; then
+            echo "post commit failed"
+            rm -f "$note_temp_file"
+            return 1
+        fi
 
-        rm -f "$note_file"
+        rm -f "$note_temp_file"
 
         log "post commit ok $commit"
     else
-        if ! git_note_add "$commit" "$note_file"; then
-            echo "add note failed: $commit, $note_file"
-            rm -f "$note_file"
+        if ! git_note_add "$commit" "$note_temp_file"; then
+            echo "add note failed: $commit, $note_temp_file"
+            rm -f "$note_temp_file"
             return 1
         fi
 
         echo "note_add_file ok"
 
-        rm -f "$note_file"
-
         ! refresh_later_full_notes "$commit" && echo "Failed to refresh later full notes" && return 1
     fi
+
+    rm -f "$note_temp_file"
 
     echo "refresh_later_full_notes ok"
 
@@ -3499,11 +3594,13 @@ rebuild_full_index()
 
     ! str=$(prebuild_full_index "$commit") && echo "$str" && echo "prebuild full index failed" && return 1
 
-    print_n "$str" | LC_ALL=C sort > "$full_index_file.temp.$$"
+    full_index_temp_file="$(make_temp_file "kmt_full_index_temp_file")" || return 1
 
-    ! index_is_valid "full" "$full_index_file.temp.$$" && echo "invalid content in full index file: $full_index_file.temp.$$" && return 1
+    print_n "$str" | LC_ALL=C sort > "$full_index_temp_file"
 
-    ! mv "$full_index_file.temp.$$" "$full_index_file" && return 1
+    ! index_is_valid "full" "$full_index_temp_file" && echo "invalid content in full index file: $full_index_temp_file" && return 1
+
+    ! mv "$full_index_temp_file" "$full_index_file" && return 1
 
     ! commit_ts=$(git_commit_time "$commit") && return 1
 
@@ -3568,6 +3665,592 @@ verify_or_amend_commit_note()
     [ -f "$commit_note" ] && rm -f "$commit_note"
 
     return 2
+}
+
+#
+# Remote notes synchronization: fetch, push and pull handlers.
+#
+# This module is sourced by git.sh after the core/index modules and before
+# git_command_handler.
+#
+
+check_note_refs_safety()
+{
+    remote_name="${REMOTE_NAME:-origin}"
+
+    for _action in "fetch" "push"; do
+        config_refspecs=$(origin_git config --get-all \
+            "remote.$remote_name.$_action" 2>/dev/null)
+
+        while IFS= read -r _config_refspec; do
+            [ -n "$_config_refspec" ] || continue
+
+            if refspec_covers_kmt_note "$_config_refspec"; then
+                echo "KMT notes ref must not be in remote.$remote_name.$_action." >&2
+                echo "Remove refs/notes/$NOTE_REF from remote.$remote_name.$_action and retry." >&2
+                return 1
+            fi
+        done <<EOF
+$config_refspecs
+EOF
+    done
+
+    return 0
+}
+
+# Return 0 when a refspec source or destination names (or can match) the KMT
+# notes ref.  Other notes refs, branches, and tags must remain usable.
+refspec_covers_kmt_note()
+{
+    _refspec="$1"
+    _kmt_ref="refs/notes/$NOTE_REF"
+
+    case "$_refspec" in
+        ^*) _refspec="${_refspec#^}" ;;
+        +*) _refspec="${_refspec#+}" ;;
+    esac
+
+    case "$_refspec" in
+        *:*) _src="${_refspec%%:*}"
+             _dst="${_refspec#*:}" ;;
+        *)   _src="$_refspec"
+             _dst= ;;
+    esac
+
+    if [ -n "$_src" ]; then
+        case "$_kmt_ref" in
+            $_src) return 0 ;;
+        esac
+    fi
+
+    if [ -n "$_dst" ]; then
+        case "$_kmt_ref" in
+            $_dst) return 0 ;;
+        esac
+    fi
+
+    return 1
+}
+
+check_note_refspec_args()
+{
+    for arg in "$@"; do
+        case "$arg" in
+            --refmap=*)
+              if refspec_covers_kmt_note "${arg#--refmap=}"; then
+                  echo "Do not use --refmap with refs/notes/$NOTE_REF." >&2
+                  return 1
+              fi
+              ;;
+            --mirror)
+              echo "Do not use --mirror with KMT; it can push refs/notes/$NOTE_REF." >&2
+              return 1
+              ;;
+            -*)
+              continue
+              ;;
+            *)
+              if refspec_covers_kmt_note "$arg"; then
+                  echo "Do not fetch/push refs/notes/$NOTE_REF manually." >&2
+                  echo "KMT manages this notes ref automatically." >&2
+                  return 1
+              fi
+              ;;
+        esac
+    done
+
+    return 0
+}
+
+post_push ()
+{
+    origin_git push \
+                "$REMOTE_NAME" \
+                "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" && return 0
+
+    log "push $REMOTE_NAME failed, maybe notes push rejected, fetch and merge then retry"
+    post_fetch || return 1
+
+    origin_git push "$REMOTE_NAME" \
+        "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" || return 1
+
+    return 0
+}
+
+post_fetch_cleanup()
+{
+    if [ -n "${fetch_tmp:-}" ] && [ -d "$fetch_tmp" ]; then
+        rm -rf "$fetch_tmp"
+    fi
+    fetch_tmp=
+
+    if [ -n "${fetch_ref:-}" ]; then
+        origin_git update-ref -d "$fetch_ref" 2>/dev/null
+    fi
+    fetch_ref=
+}
+
+# Snapshot the local notes ref before an intercepted fetch/pull.  The
+# underlying Git command may itself update refs/notes/kmt/mtime (for example,
+# an explicit notes refspec), before post_fetch has a chance to merge it.
+pre_fetch_notes_backup()
+{
+    notes_backup_id=$(git_rev_parse "refs/notes/$NOTE_REF") || notes_backup_id=
+
+    if [ -n "$notes_backup_id" ]; then
+        origin_git update-ref "$NOTE_BACKUP_REF" "$notes_backup_id" || return 1
+    else
+        origin_git update-ref -d "$NOTE_BACKUP_REF" 2>/dev/null
+    fi
+
+    notes_backup_prepared=1
+    return 0
+}
+
+post_fetch_notes_backup_cleanup()
+{
+    if [ "${notes_backup_prepared:-0}" = "1" ]; then
+        origin_git update-ref -d "$NOTE_BACKUP_REF" 2>/dev/null
+        notes_backup_prepared=0
+        notes_backup_id=
+    fi
+}
+
+restore_notes_ref_from_backup()
+{
+    [ "${notes_backup_prepared:-0}" = "1" ] || return 0
+
+    current_note_tip=$(git_rev_parse "refs/notes/$NOTE_REF") || current_note_tip=
+
+    [ "$current_note_tip" = "$notes_backup_id" ] && return 0
+
+    log "restore notes ref before post_fetch: current='$current_note_tip', backup='$notes_backup_id'"
+
+    if [ -n "$notes_backup_id" ]; then
+        if [ -n "$current_note_tip" ]; then
+            origin_git update-ref "refs/notes/$NOTE_REF" \
+                "$notes_backup_id" "$current_note_tip" || return 1
+        else
+            origin_git update-ref "refs/notes/$NOTE_REF" \
+                "$notes_backup_id" || return 1
+        fi
+    else
+        if [ -n "$current_note_tip" ]; then
+            origin_git update-ref -d "refs/notes/$NOTE_REF" \
+                "$current_note_tip" || return 1
+        fi
+    fi
+
+    return 0
+}
+
+post_fetch_prepare()
+{
+    old_commit_id="$1"
+    old_note_id="$2"
+
+    fetch_ref="refs/notes/$NOTE_REF.fetch"
+    fetch_notes_ref="$NOTE_REF.fetch"
+    fetch_tmp=
+
+    if ! restore_notes_ref_from_backup; then
+        post_fetch_cleanup
+        return 1
+    fi
+
+    [ "${notes_backup_prepared:-0}" = "1" ] && old_note_id="$notes_backup_id"
+    [ -z "$old_note_id" ] && old_note_id="$(git_rev_parse "refs/notes/$NOTE_REF")"
+
+    return 0
+}
+
+post_fetch_fetch_remote()
+{
+    if ! origin_git fetch "$REMOTE_NAME" "+refs/notes/$NOTE_REF:$fetch_ref"; then
+        return 1
+    fi
+
+    fetch_tmp=$(make_temp_dir "kmt-fetch") || return 1
+
+    fetch_local_list="$fetch_tmp/local.list"
+    fetch_remote_list="$fetch_tmp/remote.list"
+    fetch_todo="$fetch_tmp/todo"
+    fetch_changed="$fetch_tmp/changed"
+    fetch_remote_note="$fetch_tmp/remote.note"
+    fetch_local_note="$fetch_tmp/local.note"
+
+    : > "$fetch_changed" || return 1
+    return 0
+}
+
+post_fetch_refresh_changed()
+{
+    [ -s "$fetch_changed" ] || return 0
+
+    while IFS= read -r fetch_commit; do
+        [ -n "$fetch_commit" ] || continue
+        if ! refresh_later_full_notes "$fetch_commit"; then
+            echo "refresh full index failed: $fetch_commit" >&2
+            return 1
+        fi
+    done < "$fetch_changed"
+
+    return 0
+}
+
+# Return values:
+#   0: handled, caller can cleanup and return success
+#   1: not a linear/empty-local case, caller should merge divergent notes
+#   2: error
+post_fetch_try_linear()
+{
+    fetch_remote_tip=$(git_rev_parse "$fetch_ref") || fetch_remote_tip=
+    fetch_local_tip="$old_note_id"
+
+    [ -n "$fetch_remote_tip" ] || return 1
+    [ "$fetch_local_tip" = "$fetch_remote_tip" ] && return 1
+
+    if [ -z "$fetch_local_tip" ]; then
+        git notes --ref="$fetch_notes_ref" list 2>/dev/null |
+            awk '{print $2}' > "$fetch_changed" || return 2
+
+        origin_git update-ref "refs/notes/$NOTE_REF" "$fetch_remote_tip" || {
+            echo "fast-forward notes ref from empty failed" >&2
+            return 2
+        }
+
+        post_fetch_refresh_changed || return 2
+        new_note_id=$(git_rev_parse "refs/notes/$NOTE_REF")
+        return 0
+    fi
+
+    if origin_git merge-base --is-ancestor "$fetch_remote_tip" "$fetch_local_tip"; then
+        # Local notes ref is a descendant of the remote: local is newer.
+        new_note_id=$(git_rev_parse "refs/notes/$NOTE_REF")
+        return 0
+    fi
+
+    if origin_git merge-base --is-ancestor "$fetch_local_tip" "$fetch_remote_tip"; then
+        git diff-tree -r "$fetch_local_tip" "$fetch_remote_tip" --name-only |
+            sed 's/\///' > "$fetch_changed" || return 2
+
+        origin_git update-ref "refs/notes/$NOTE_REF" "$fetch_remote_tip" "$fetch_local_tip" || {
+            echo "fast-forward notes ref failed" >&2
+            return 2
+        }
+
+        post_fetch_refresh_changed || return 2
+        new_note_id=$(git_rev_parse "refs/notes/$NOTE_REF")
+        return 0
+    fi
+
+    return 1
+}
+
+post_fetch_prepare_todo()
+{
+    if ! git notes --ref="$NOTE_REF" list > "$fetch_local_list" 2>/dev/null; then
+        # A missing local notes ref is normal (for example, first clone).
+        if git_rev_parse "refs/notes/$NOTE_REF" >/dev/null; then
+            echo "list local notes failed" >&2
+            return 1
+        fi
+        : > "$fetch_local_list" || return 1
+    fi
+
+    if ! git notes --ref="$fetch_notes_ref" list > "$fetch_remote_list" 2>/dev/null; then
+        echo "list fetched notes failed" >&2
+        return 1
+    fi
+
+    # Output: <commit><ETX><local-note-oid><ETX><remote-note-oid>
+    awk -v etx="$ETX" '
+        FILENAME == ARGV[1] { local[$2] = $1; next }
+        { print $2 etx (($2 in local) ? local[$2] : "") etx $1 }
+    ' "$fetch_local_list" "$fetch_remote_list" > "$fetch_todo" || {
+        echo "prepare fetched notes failed" >&2
+        return 1
+    }
+
+    return 0
+}
+
+post_fetch_merge_divergent()
+{
+    while IFS="$ETX" read -r fetch_commit fetch_local_oid fetch_remote_oid; do
+        [ -n "$fetch_commit" ] || continue
+        [ -n "$fetch_remote_oid" ] || continue
+        [ "$fetch_local_oid" = "$fetch_remote_oid" ] && continue
+
+        # Local has no note for this commit: copy the remote note as a whole.
+        if [ -z "$fetch_local_oid" ]; then
+            if ! git notes --ref="$fetch_notes_ref" show "$fetch_commit" > "$fetch_remote_note"; then
+                echo "read fetched note failed: $fetch_commit" >&2
+                return 1
+            fi
+
+            # Never create an empty note from an empty remote note.
+            if [ -s "$fetch_remote_note" ]; then
+                if ! git notes --ref="$NOTE_REF" add -f -F "$fetch_remote_note" "$fetch_commit"; then
+                    echo "copy fetched note failed: $fetch_commit" >&2
+                    return 1
+                fi
+                printf '%s\n' "$fetch_commit" >> "$fetch_changed" || return 1
+            fi
+            continue
+        fi
+
+        # Both sides have a note for the same commit, but their contents
+        # differ.  A commit note is one atomic snapshot: choose either the
+        # local note or the remote note as a whole.  Never merge fields.
+        echo "KMT note conflict: commit=$fetch_commit local=$fetch_local_oid remote=$fetch_remote_oid policy=$NOTE_CONFLICT_POLICY" >&2
+        log "note conflict: $fetch_commit, keep policy $NOTE_CONFLICT_POLICY"
+
+        case "$NOTE_CONFLICT_POLICY" in
+            remote)
+                if ! git notes --ref="$fetch_notes_ref" show "$fetch_commit" > "$fetch_remote_note"; then
+                    echo "read fetched note failed: $fetch_commit" >&2
+                    return 1
+                fi
+
+                # A remote empty note must never clear a local note.
+                if [ -s "$fetch_remote_note" ]; then
+                    if ! git notes --ref="$NOTE_REF" add -f -F "$fetch_remote_note" "$fetch_commit"; then
+                        echo "replace note with remote failed: $fetch_commit" >&2
+                        return 1
+                    fi
+                    printf '%s\n' "$fetch_commit" >> "$fetch_changed" || return 1
+                else
+                    log "remote note is empty, keep local: $fetch_commit"
+                fi
+                ;;
+            local|*)
+                # A local note whose entries all have empty mtime/btime is
+                # a placeholder created from a checkout, not real metadata.
+                # It may be replaced by the remote note under local policy.
+                if ! git notes --ref="$NOTE_REF" show "$fetch_commit" > "$fetch_local_note"; then
+                    echo "read local note failed: $fetch_commit" >&2
+                    return 1
+                fi
+
+                if index_is_all_files_empty "$fetch_local_note"; then
+                    if ! git notes --ref="$fetch_notes_ref" show "$fetch_commit" > "$fetch_remote_note"; then
+                        echo "read fetched note failed: $fetch_commit" >&2
+                        return 1
+                    fi
+
+                    if [ -s "$fetch_remote_note" ]; then
+                        if ! git notes --ref="$NOTE_REF" add -f -F "$fetch_remote_note" "$fetch_commit"; then
+                            echo "replace placeholder note with remote failed: $fetch_commit" >&2
+                            return 1
+                        fi
+                        printf '%s\n' "$fetch_commit" >> "$fetch_changed" || return 1
+                        log "replace empty placeholder note with remote: $fetch_commit"
+                    else
+                        log "remote note is empty, keep local placeholder: $fetch_commit"
+                    fi
+                fi
+                ;;
+        esac
+    done < "$fetch_todo"
+
+    post_fetch_refresh_changed || return 1
+    return 0
+}
+
+post_fetch_link_remote_tip()
+{
+    # Make the local notes ref contain the fetched remote tip.  Updating
+    # individual notes with `git notes add` does not necessarily make the
+    # remote notes commit an ancestor of the local ref, so a following
+    # non-force notes push would be rejected as non-fast-forward.
+    fetch_remote_tip=$(git_rev_parse "$fetch_ref") || fetch_remote_tip=
+    fetch_local_tip=$(git_rev_parse "refs/notes/$NOTE_REF") || fetch_local_tip=
+
+    [ -n "$fetch_remote_tip" ] || return 0
+    [ "$fetch_local_tip" = "$fetch_remote_tip" ] && return 0
+    origin_git merge-base --is-ancestor "$fetch_remote_tip" "$fetch_local_tip" && return 0
+
+    if [ -z "$fetch_local_tip" ]; then
+        origin_git update-ref "refs/notes/$NOTE_REF" "$fetch_remote_tip" || {
+            echo "update notes ref to fetched tip failed" >&2
+            return 1
+        }
+        return 0
+    fi
+
+    fetch_local_tree=$(origin_git rev-parse "refs/notes/$NOTE_REF^{tree}") || return 1
+    fetch_remote_tree=$(origin_git rev-parse "$fetch_ref^{tree}") || return 1
+
+    if origin_git merge-base --is-ancestor "$fetch_local_tip" "$fetch_remote_tip" &&
+       [ "$fetch_local_tree" = "$fetch_remote_tree" ]; then
+        # Local ref is behind and has the same content: fast-forward.
+        origin_git update-ref "refs/notes/$NOTE_REF" "$fetch_remote_tip" "$fetch_local_tip" || {
+            echo "fast-forward notes ref failed" >&2
+            return 1
+        }
+        return 0
+    fi
+
+    # Diverged histories or local content differs: create a notes
+    # merge commit using the local tree, with both tips as parents.
+    fetch_merge_commit=$(origin_git commit-tree "$fetch_local_tree" \
+        -m "kmt: merge fetched notes" \
+        -p "$fetch_local_tip" -p "$fetch_remote_tip") || {
+        echo "create notes merge commit failed" >&2
+        return 1
+    }
+
+    origin_git update-ref "refs/notes/$NOTE_REF" "$fetch_merge_commit" "$fetch_local_tip" || {
+        echo "update notes ref with merge commit failed" >&2
+        return 1
+    }
+
+    return 0
+}
+
+post_fetch()
+{
+    post_fetch_prepare "$1" "$2" || return 1
+
+    if ! post_fetch_fetch_remote; then
+        post_fetch_cleanup
+        return 1
+    fi
+
+    post_fetch_try_linear
+    linear_ret=$?
+
+    if [ "$linear_ret" = "2" ]; then
+        post_fetch_cleanup
+        return 1
+    fi
+
+    if [ "$linear_ret" = "0" ]; then
+        post_fetch_cleanup
+        return 0
+    fi
+
+    if ! post_fetch_prepare_todo; then
+        post_fetch_cleanup
+        return 1
+    fi
+
+    if ! post_fetch_merge_divergent; then
+        post_fetch_cleanup
+        return 1
+    fi
+
+    if ! post_fetch_link_remote_tip; then
+        post_fetch_cleanup
+        return 1
+    fi
+
+    new_note_id=$(git_rev_parse "refs/notes/$NOTE_REF")
+    post_fetch_cleanup
+    return 0
+}
+
+post_pull()
+{
+    old_commit_id="$1"
+    old_note_id="$2"
+
+    if ! post_fetch "$old_commit_id" "$old_note_id"; then
+        return 1
+    fi
+
+    pull_new_head=$(git_current_head)
+
+    if [ -z "$pull_new_head" ] || [ "$pull_new_head" = "$old_commit_id" ]; then
+        log "head has not moved: $old_commit_id"
+        if [ "$old_note_id" != "$new_note_id" ]; then
+            log "note has changed: $old_note_id"
+            ! on_head_moved && return 1
+        else
+            log "note has not changed: $old_note_id"
+        fi
+        return 0
+    fi
+
+    # If the old HEAD is still an ancestor of the new HEAD, pull was a
+    # fast-forward or a merge.  Only the new HEAD may need a note.
+    pull_upstream=$(origin_git rev-parse "@{upstream}" 2>/dev/null) || pull_upstream=
+
+    if [ -n "$old_commit_id" ] &&
+       origin_git merge-base --is-ancestor "$old_commit_id" "$pull_new_head"; then
+        if ! git_note_show "$pull_new_head"; then
+            if [ -n "$pull_upstream" ] &&
+               [ "$pull_new_head" = "$pull_upstream" ]; then
+                # A plain-Git upstream commit has no KMT note.  Do not
+                # fabricate one from this checkout; another KMT user can
+                # publish the real note later and it will import cleanly.
+                echo "KMT note missing for upstream commit $pull_new_head." >&2
+                echo "Not creating a placeholder note from the local checkout." >&2
+            else
+                rebuild_commit_note "$pull_new_head" || return 1
+            fi
+        fi
+    else
+        # Pull rewrote local commits (pull --rebase).  Migrate their notes
+        # with the same range-diff logic used by the direct rebase path.
+        if [ -z "$pull_upstream" ]; then
+            echo "pull --rebase: upstream commit not found" >&2
+            return 1
+        fi
+
+        pull_old_base=$(origin_git merge-base "$old_commit_id" "$pull_upstream") || pull_old_base=
+
+        if [ -z "$pull_old_base" ]; then
+            echo "pull --rebase: old base commit not found" >&2
+            return 1
+        fi
+
+        if pull_range_diff=$(origin_git range-diff --no-abbrev --no-color \
+                "$pull_old_base..$old_commit_id" \
+                "$pull_upstream..$pull_new_head"); then
+
+            print_n "$pull_range_diff" |
+                parse_range_diff |
+                complete_rewritten_commit || return 1
+        else
+            echo "pull --rebase: range-diff failed" >&2
+            return 1
+        fi
+    fi
+
+    on_head_moved || return 1
+
+    full_note_file=$(index_get_file "$old_commit_id" "full")
+    [ -f "$full_note_file" ] && rm -f "$full_note_file"
+
+    return 0
+}
+
+post_clone()
+{
+    #The urls are not always endswith suffix ".git", such as "git clone -b master https://github/abc/efg"
+    ! upstream_url=$(grep_arg '(:|/)[^/]+$' "$@") && echo "unknown url" && return 0
+
+    log "url: $upstream_url"
+
+    repo_dir=$(select_arg "$upstream_url" "$@")
+    if [ -z "$repo_dir" ] ; then
+        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]+$' | cut -c 2-)
+        repo_dir=${repo_dir%.*}
+    fi
+    echo "cd cloned-dir: $repo_dir, remote: $REMOTE_NAME"
+
+    cd "$repo_dir" && init_path || return 1
+
+    if ! post_fetch; then
+        echo "post_fetch failed"
+        return 1
+    fi
+
+    ! on_head_moved && echo "post_head_moved failed" && return 1
+
+    return 0
 }
 
 
@@ -3688,10 +4371,10 @@ batch_stat_mtime_ext()
     else
         if [ "$PLATFORM" = 'linux' ]; then
             [ "$1" = 1 ] && ext_data="%W" || ext_data=""
-            xargs -0 -L 100 stat -c "$STX%n$ETX%Y$ETX$ext_data"
+            xargs -0 $XARGS_L stat -c "$STX%n$ETX%Y$ETX$ext_data"
         else
             [ "$1" = 1 ] && ext_data="%B" || ext_data=""
-            xargs -0 -L 100 stat -f "$STX%N$ETX%m$ETX$ext_data"
+            xargs -0 $XARGS_L stat -f "$STX%N$ETX%m$ETX$ext_data"
         fi
     fi
 
@@ -3747,7 +4430,7 @@ exclude_status_files()
 {
     empty_it="$1"
 
-    tmp_file="${TMPDIR:-/tmp}/kmt_status_files.$$"
+    tmp_file="$(make_temp_file "kmt_status_files")" || return 1
 
 #    git_status_files | cut -c 4- | sed "s/^/$STX/" | index_encode_inline | LC_ALL=C sort > "$tmp_file"
     (git_status_files | cut -c 4- | sed "s/^/$STX/" &&
@@ -3913,7 +4596,7 @@ pre_commit()
     log "on prev commit: $stage_file"
     while IFS="$ETX" read -r file mtime btime
     do
-#        log "staged file: $file, $mtime, $btime, $now_ts"
+#        log "staged file: $file, $btime, $mtime, $now_ts"
         if [ "$mtime" != "D" ]; then
             if [ -f "$full_note_file" ] && index_select_item_value 4 "$full_note_file" "$file"; then
                   if [ "$mtime" -lt "$now_ts" ]; then
@@ -3959,8 +4642,9 @@ pre_rebase()
         }
 
         if grep "^kmt-note-oid: " "$message_file"; then
-            sed "s/^kmt-note-oid: .*/kmt-note-oid: ${kmt_note_oid}/" "$message_file" > "$message_file.$$" || return 1
-            mv -f "$message_file.$$" "$message_file" || return 1
+            message_temp_file="$(make_temp_file "kmt_message_temp_file")" || return 1
+            sed "s/^kmt-note-oid: .*/kmt-note-oid: ${kmt_note_oid}/" "$message_file" > "$message_temp_file" || return 1
+            mv -f "$message_temp_file" "$message_file" || return 1
         else
             [ "$ENABLE_OID_VERIFY" = 1 ] && echo "kmt-note-oid: ${kmt_note_oid}" >> "$message_file"
         fi
@@ -3984,29 +4668,6 @@ pre_rebase()
     return 0
 }
 
-post_clone()
-{
-    ! upstream_url=$(grep_arg '(:|/)[^/]+$' "$@") && echo "unknown url" && return 0
-    log "url: $upstream_url"
-
-    repo_dir=$(select_arg "$upstream_url" "$@")
-    if [ -z "$repo_dir" ] ; then
-        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]+$' | cut -c 2- | cut -d '.' -f 1)
-    fi
-    echo "cd cloned-dir: $repo_dir, remote: $REMOTE_NAME"
-
-    cd "$repo_dir" && init_path || return 1
-
-    if ! post_fetch; then
-        echo "post_fetch failed"
-        return 1
-    fi
-
-    ! on_head_moved && echo "post_head_moved failed" && return 1
-
-    return 0
-}
-
 post_commit()
 {
     note_file="$1"
@@ -4022,7 +4683,7 @@ post_commit()
         log "add note ok $cur_commit, $note_file"
     else
         ! commit_files=$(git_diff_commit_files "$cur_commit") && echo "diff-tree failed" && return 1
-        [ -n "$commit_files" ] && echo "stage file missing" && return 1
+        [ -n "$commit_files" ] && echo "diff files exists, but note content is empty." && return 1
 
         log "empty note, $note_file"
     fi
@@ -4192,6 +4853,11 @@ complete_rewritten_commit()
                     rm -f "$prev_stage_file" || return 1
                 else
                     [ "$orig_commit" = "-" ] && log "skip rewritten_commit: $rewritten_commit" && continue
+
+                    if ! git_note_show "$orig_commit"; then
+                        log "no note to copy: $orig_commit -> $rewritten_commit"
+                        continue
+                    fi
 
                     log "complete commit by copy: $orig_commit to $rewritten_commit"
                     git_note_copy "$orig_commit" "$rewritten_commit" || return 1
@@ -4426,69 +5092,6 @@ EOF
     return 0
 }
 
-post_push ()
-{
-    ! origin_git push \
-                "$REMOTE_NAME" \
-                "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" && return 1 || return 0
-}
-
-post_fetch()
-{
-    old_commit_id="$1"
-
-    old_note_id="$(git_rev_parse "refs/notes/$NOTE_REF")"
-
-    if ! origin_git fetch "$REMOTE_NAME" "+refs/notes/$NOTE_REF:refs/notes/$NOTE_REF"; then
-        return 1
-    fi
-
-    new_note_id=$(git_rev_parse "refs/notes/$NOTE_REF")
-
-    if [ -n "$old_note_id" ] &&
-        [ -n "$new_note_id" ] &&
-        [ "$old_note_id" != "$new_note_id" ]; then
-
-        log "old_note_id: $old_note_id, new_note_id: $new_note_id"
-
-        git diff-tree -r "$old_note_id" "$new_note_id" --name-only | sed 's/\///' | {
-                while IFS= read -r commit_id
-                do
-                    log "commit note changed: $commit_id"
-                    refresh_later_full_notes "$commit_id" || return 1
-                done
-            }
-    fi
-
-    return 0
-}
-
-post_pull()
-{
-    old_commit_id="$1"
-
-    if ! post_fetch "$old_commit_id"; then
-        return 1
-    fi
-
-    if [ "$(git_current_head)" != "$old_commit_id" ]; then
-        ! on_head_moved && return 1
-
-        full_note_file=$(index_get_file "$old_commit_id" "full")
-        [ -f "$full_note_file" ] && rm -f "$full_note_file"
-    else
-        log "head has not moved: $old_commit_id"
-        if [ "$old_note_id" != "$new_note_id" ]; then
-            log "note has changed: $old_note_id"
-            ! on_head_moved && return 1
-        else
-            log "note has not changed: $old_note_id"
-        fi
-    fi
-
-    return 0
-}
-
 # ---------------------------------------------------------------------------
 # Checkout / restore / pull/update handlers
 # ---------------------------------------------------------------------------
@@ -4513,6 +5116,17 @@ git_command_handler()
         revert)
             pre_revert "$@" || return 1
             ;;
+        fetch|pull|push)
+            check_note_refspec_args "$@" || return 1
+            check_note_refs_safety || return 1
+
+            old_note_id="$(git_rev_parse "refs/notes/$NOTE_REF")"
+
+            if [ "$cmd" != "push" ] &&
+               ! select_arg "--dry-run" "$@"; then
+                pre_fetch_notes_backup || return 1
+            fi
+            ;;
         rebase)
             pre_rebase "$@" || return 1
             ;;
@@ -4522,8 +5136,9 @@ git_command_handler()
 
     if [ "$cmd" = 'clone' ]; then
         old_commit_id=
+        old_note_id=
     else
-        ! old_commit_id=$(git_current_head) && return 1
+        ! old_commit_id="$(git_current_head)" && return 1
     fi
 
 #    log "git cmd: $*"
@@ -4606,27 +5221,43 @@ git_command_handler()
         restore)
             log "post $cmd ..."
             if select_arg "--staged" "$@"; then
-                # in this case( with --staged), the file just moved out from the stage, but not restore the file content.
-                # and commit not changed, so do not restore the mtime, just refresh the stage note.
-                ! refresh_stage_note "$working_files_before" && return 1
-                log "post $cmd ok"
-                return 0
+                refresh_stage_note "$working_files_before" || return 1
+
+                if ! select_arg "--worktree" "$@"; then
+                    # in this case( with --staged and without --worktree), the file just moved out from the stage, but not restore the file content.
+                    # and commit not changed, so do not restore the mtime, just refresh the stage note.
+                    log "post $cmd ok"
+                    return 0
+                fi
             fi
+
+            files=$(select_args_inline "--" "$@")
 
             if source=$(select_arg "--source" "$@"); then
                 log "source: $source"
-                files=$(select_args_inline "--source=$source" "$@")
+                if [ -z "$files" ]; then
+                    files=$(select_args_inline "--source=$source" "$@")
+                    [ -z "$files" ] && files=$(select_args_inline "$source" "$@")
+                fi
+            elif source=$(select_arg "-s" "$@"); then
+                log "source: $source"
+                if [ -z "$files" ]; then
+                    files=$(select_args_inline "-s=$source" "$@")
+                    [ -z "$files" ] && files=$(select_args_inline "$source" "$@")
+                fi
             else
                 source=
-                files=$(select_args_inline "restore" "$@")
+                if [ -z "$files" ]; then
+                    files=$(select_args_inline "restore" "$@")
+                fi
             fi
 
-            if [ -n "$files" ]; then
-                log "restore $files from source: '$source'"
-                post_restore_files "$files" "$ts_before" "$source" || return 1
-            else
-                echo "no files to restore" && return 1
-            fi
+            log "restore $files from source: '$source'"
+
+            [ -z "$files" ] && echo "no files to restore" && return 1
+
+            post_restore_files "$files" "$ts_before" "$source" || return 1
+
             log "post $cmd ok"
             ;;
         checkout)
@@ -4638,9 +5269,9 @@ git_command_handler()
             [ -z "$source" ] && echo "unknown branch" && return 1
 
             if select_arg "--" "$@" > /dev/null; then
-                files=$(select_args "--" "$@")
+                files=$(select_args_inline "--" "$@")
             else
-                files=$(select_args "$source" "$@")
+                files=$(select_args_inline "$source" "$@")
             fi
 
             if [ "$(git_current_head)" != "$old_commit_id" ]; then
@@ -4648,7 +5279,8 @@ git_command_handler()
                 ! on_head_moved && return 1
             elif [ -n "$files" ]; then
                 #checkout path may be a dir, and they had moved into the stage
-                ! post_checkout_files "$working_files_before" "$ts_before" "$source" && return 1
+                post_restore_files "$files" "$ts_before" "$source" || return 1
+#                ! post_checkout_files "$working_files_before" "$ts_before" "$source" && return 1
             fi
 
             log "post $cmd ok"
@@ -4696,26 +5328,32 @@ git_command_handler()
             ;;
         push)
             log "post $cmd ..."
-            if ! post_push; then
-                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
-                echo "Git push succeeded but timestamp note push failed." && return 1
+            if ! select_arg "--dry-run" "$@"; then
+                if ! post_push "$@"; then
+                    ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                    echo "Git push succeeded but timestamp note push failed." && return 1
+                fi
             fi
             log "post $cmd ok"
             ;;
         fetch)
             log "post $cmd ..."
-            if ! post_fetch "$old_commit_id"; then
-                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
-                echo "Git pull succeeded but timestamp note fetch failed." && return 1
+            if ! select_arg "--dry-run" "$@"; then
+                if ! post_fetch "$old_commit_id" "$old_note_id"; then
+                    ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                    echo "Git pull succeeded but timestamp note fetch failed." && return 1
+                fi
+                post_fetch_notes_backup_cleanup
             fi
             log "post $cmd ok"
             ;;
         pull)
             log "post $cmd ..."
-            if ! post_pull "$old_commit_id"; then
+            if ! post_pull "$old_commit_id" "$old_note_id"; then
                 ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
                 echo "Git pull succeeded but timestamp note pull failed." && return 1
             fi
+            post_fetch_notes_backup_cleanup
             log "post $cmd ok"
             ;;
     esac
@@ -4737,6 +5375,10 @@ init_path()
 
     [ "$REPO_ROOT" = "$CUR_DIR" ] && SUB_DIR= || SUB_DIR=${CUR_DIR#*"$REPO_ROOT/"}/
     find_command "look" > /dev/null && IS_LOOK_INSTALLED=1 || IS_LOOK_INSTALLED=0
+
+    check_note_refs_safety || return 1
+
+    return 0
 }
 
 show_note()
@@ -4923,12 +5565,12 @@ app_command_handler()
             fi
             ;;
         add|rm|mv|commit|merge|restore|revert|reset|rebase|switch|checkout|clone|push|fetch|pull)
-            init_path
+            init_path || return 1
             git_command_handler "$cmd" "$@"
             ;;
         kmt-note)
             shift
-            init_path
+            init_path || return 1
 
             app_is_working_copy || return 1
 
@@ -4962,7 +5604,7 @@ app_is_working_copy()
 
 app_kmt_init()
 {
-    init_path
+    init_path || return 1
 }
 
 app_is_update_to_date()
@@ -5060,6 +5702,7 @@ app_complete_file_time()
         [ "$type" = 1 ] && note_ts="$MTIME_RESULT" || note_ts="$BTIME_RESULT"
         if [ "$note_ts" = "$file_ts" ]; then
             log "note-time exists in note, type:$type, file:'$rfile', 'ts':$file_ts,  'commit':$commit,"
+            rm -f "$INDEX_FILE_NAME"
             return 0
         fi
     fi
