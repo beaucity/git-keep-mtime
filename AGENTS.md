@@ -4,7 +4,7 @@
 
 Git Keep MTime (`git_kmt`) is a Git extension that preserves filesystem modification times by storing mtime metadata in Git Notes and synchronizing the working tree after relevant Git operations.
 
-Current release target: **v0.1.3-alpha**.
+Current release target: **v0.4.6**.
 
 ## Public Repository Structure
 
@@ -56,8 +56,12 @@ refs/notes/kmt/mtime
 KMT note entries use the logical format:
 
 ```text
-<STX>filename<ETX>mtime
+<STX>filename<ETX>mtime<ETX>btime
 ```
+
+`mtime` may be a Unix timestamp, `D` for a deleted path, or empty. `btime` is a
+Unix timestamp or empty. A note whose entries all have empty time fields is a
+placeholder, not real metadata.
 
 The STX prefix is significant because KMT uses exact fixed-string searches such as:
 
@@ -91,7 +95,7 @@ README should focus on:
 3. Installation and Quick Start.
 4. Main KMT commands.
 5. Git Notes at a high level.
-6. Current alpha limitations.
+6. Current limitations.
 
 Detailed storage and implementation information belongs in `docs/Architecture.md` and `docs/Storage.md`.
 
@@ -108,4 +112,4 @@ Before publishing a release:
 - Verify the Git Notes ref is `refs/notes/kmt/mtime`.
 - Remove obsolete references to the former `timestamps` notes ref.
 - Ensure the public documentation refers to `shell/git_kmt.sh`.
-- Keep alpha limitations explicit until the corresponding features are stable.
+- Keep current limitations explicit until the corresponding features are stable.

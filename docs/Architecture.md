@@ -1,263 +1,162 @@
-# Git Keep MTime Architecture
+# Architecture
 
-## 1. Overview
+Git Keep MTime is a client-side Git wrapper. It does not change Git's commit or
+tree object model. Instead, it records filesystem timestamp metadata in Git
+notes and applies that metadata around working-tree operations.
 
-Git Keep MTime (KMT) adds filesystem modification-time preservation to Git without modifying Git's normal tree or commit object format.
-
-The fundamental model is:
-
-```text
-                    Git repository
-                         │
-                  Git commits / trees
-                         │
-                         │ content + history
-                         │
-                         ▼
-                 Git working tree
-                         ▲
-                         │
-                  mtime synchronize
-                         │
-                         │ KMT metadata
-                         │
-                  Git Notes ref
-                         │
-             refs/notes/kmt/mtime
-```
-
-Git remains responsible for file contents and history. KMT stores the additional filesystem metadata and applies it back to the working tree when necessary.
-
-## 2. Public Program Structure
-
-The GitHub release exposes the KMT program as:
+## High-level model
 
 ```text
-shell/
-└── git_kmt.sh
+git command
+    |
+    v
+KMT wrapper
+    |
+    +----------------------+
+    |                      |
+    v                      v
+original Git          KMT metadata
+    |                      |
+    v                      v
+repository objects    refs/notes/kmt/mtime
+working tree          .git/kmt caches
 ```
 
-`git_kmt.sh` is the public entry point. Internal development source organization is intentionally not part of the public architecture documentation.
+Git remains responsible for commits, trees, blobs, branches, merges, rebases,
+and the working tree.
 
-## 3. Git Wrapper Model
+KMT adds:
 
-KMT is implemented as a Git wrapper. During installation, the normal Git command is kept available behind the KMT wrapper.
+- timestamp notes keyed by commit;
+- working-tree timestamp capture and restoration;
+- note synchronization through fetch/pull/push;
+- local, rebuildable indexes;
+- completion and conflict workflows.
 
-Conceptually:
+## Wrapper lifecycle
+
+The installed `git` command is a wrapper. The original Git executable is kept
+behind it. A command goes through roughly this sequence:
 
 ```text
-user
- │
- ▼
-git <command>
- │
- ▼
-Git Keep MTime wrapper
- │
- ├── KMT-specific command
- │      └── execute KMT operation
- │
- └── normal Git command
-        │
-        ▼
-   original Git
+parse command
+  -> pre-operation checks and snapshots
+  -> original Git operation
+  -> post-operation timestamp sync
+  -> note/index updates
 ```
 
-For ordinary Git operations, KMT delegates to the original Git executable. For operations that can affect mtime state, KMT performs additional processing before or after the Git operation.
+Commands that do not need timestamp handling are forwarded to the original Git
+executable.
 
-## 4. Commit and MTime Relationship
+## Commit notes
 
-A Git commit identifies a specific version of repository content. KMT associates mtime metadata with that commit through a Git Note.
-
-Conceptually:
-
-```text
-Commit A ──────────► KMT Note A
-                       │
-                       ├── a.txt → mtime T1
-                       └── b.txt → mtime T1
-
-Commit B ──────────► KMT Note B
-                       │
-                       ├── a.txt → mtime T2
-                       └── b.txt → mtime T1
-```
-
-A later commit does not need to duplicate unchanged metadata unnecessarily. KMT maintains incremental metadata and can construct a full state when required for synchronization.
-
-## 5. Why Git Notes?
-
-Putting mtime into Git's normal tree would make filesystem metadata part of the content tree and would require changing the representation of ordinary files.
-
-Git Notes provide a separate metadata channel:
-
-```text
-Git tree / commit
-    = repository content and history
-
-Git Notes
-    = KMT filesystem metadata
-```
-
-This keeps the KMT information logically separate from repository content while still allowing it to be versioned and transported using Git's object model.
-
-The dedicated KMT notes ref is:
+The authoritative metadata ref is:
 
 ```text
 refs/notes/kmt/mtime
 ```
 
-## 6. Incremental Metadata
+For each relevant commit, the notes tree maps the commit ID to a note containing
+repository-relative paths and timestamp fields.
 
-KMT is designed around incremental changes rather than rebuilding metadata for every commit.
+The note is atomic per commit. KMT does not merge individual fields from two
+different versions of the same commit note.
 
-A simplified flow is:
+See [Storage](Storage.md) for the on-disk format.
 
-```text
-previous mtime state
-        │
-        ▼
-changed files in Git operation
-        │
-        ▼
-mtime delta
-        │
-        ▼
-commit note
-        │
-        ▼
-new mtime state
-```
+## Working-tree synchronization
 
-For operations that require a complete state, KMT can merge the relevant incremental information into a full note representation.
+When Git changes the working tree, KMT:
 
-## 7. Working-Tree Synchronization
+1. finds the target commit;
+2. reads the target full index and commit note;
+3. compares target timestamps with the current filesystem state;
+4. avoids overwriting newer local timestamps when the target metadata is older;
+5. applies mtime, and btime where supported.
 
-Synchronization is the point where repository metadata becomes filesystem state.
+The filesystem is modified; tracked file content is not.
 
-For a target commit:
+Uncommitted and staged files are excluded from unsafe restoration paths.
 
-```text
-Target commit
-     │
-     ▼
-KMT mtime metadata
-     │
-     ▼
-file → mtime lookup
-     │
-     ▼
-set filesystem mtime
-```
+## Local indexes
 
-The synchronization process is intentionally separate from Git content checkout. Git first performs its normal operation; KMT then applies the target mtime information to the resulting working tree.
+`.git/kmt/` contains derived indexes and temporary state. These files accelerate
+lookups and can be rebuilt from Git history and notes. They are not part of the
+shared metadata.
 
-## 8. Switch and Checkout
+## Fetch, pull, and push
 
-This is the primary user-visible feature.
+Branch refs and notes refs are independent in Git. KMT coordinates them:
 
-Suppose two branches contain the same file with different historical mtimes:
+- `fetch`/`pull` fetch branch data and the notes ref;
+- `push` publishes the local notes ref after the branch push.
+
+KMT may create a notes merge commit when local and remote notes have diverged.
+The merge commit keeps both histories while selecting the configured whole-note
+state.
+
+KMT rejects manual notes refspecs that could update or publish the KMT notes ref
+outside its synchronization logic.
+
+## Conflicts
+
+A conflict occurs when the same commit has different local and remote notes.
+
+The default policy is:
 
 ```text
-branch-A
-  a.txt → T1
-
-branch-B
-  a.txt → T2
+local  -> keep the whole local note
+remote -> use the whole remote note
 ```
 
-After:
+Normal linear notes updates are fast-forwards, not conflicts.
 
-```sh
-git switch branch-A
-```
+Placeholder notes whose entries all have empty time fields may be replaced by a
+real remote note even under the local policy.
 
-KMT synchronizes `a.txt` to `T1`.
+## History rewriting
 
-After:
+Rebase and pull --rebase create new commit IDs. KMT uses rewritten-commit
+information and range comparison to migrate notes from the old commits to the
+new ones.
 
-```sh
-git switch branch-B
-```
+The notes stay associated with the rewritten history rather than obsolete commit
+IDs.
 
-KMT synchronizes it to `T2`.
+## Mixed KMT and plain Git
 
-The same principle applies when checking out another commit.
+The original Git binary does not create KMT notes and does not fetch the notes
+ref.
 
-This makes Git branch switching behave more like switching between complete historical filesystem states: content and recorded mtime are synchronized together.
+KMT therefore:
 
-## 9. Other Git Operations
+- does not fabricate a placeholder note for a fast-forward upstream commit;
+- warns when an upstream commit has no note;
+- imports a later real note when it becomes available;
+- requires an explicit KMT fetch before synchronizing after a plain Git pull.
 
-KMT also handles mtime-related consequences of operations including:
+Mixed workflows cannot guarantee timestamp fidelity for commits that never pass
+through KMT metadata completion.
 
-```text
-add
-rm
-rename
-commit
-merge
-restore
-revert
-reset
-rebase
-switch
-checkout
-pull
-push
-```
+## Recovery boundaries
 
-The exact handling differs by operation. Operations that create or modify repository history create/update KMT metadata; operations that move the working tree synchronize mtime as appropriate.
+The notes ref is the authoritative mapping from commits to timestamp notes.
+Commit content alone cannot reconstruct historical mtimes.
 
-## 10. Existing Repository Completion
+Recovery relies on one of:
 
-When KMT is introduced to an existing repository, historical mtime metadata may be missing.
+- a reachable notes ref or backup ref;
+- another remote notes ref;
+- an explicit completion from the local filesystem.
 
-The completion process is:
+KMT does not invent historical timestamps from commit diffs or current checkout
+times.
 
-```text
-existing working tree
-        │
-        ▼
-kmt-scan
-        │
-        ▼
-identify files with missing metadata
-        │
-        ▼
-kmt-complete
-        │
-        ▼
-KMT metadata becomes available
-```
+## Trust and security
 
-The local filesystem timestamp is used as the source for completion. Therefore KMT requires the working tree to contain trustworthy timestamps before completion.
+KMT notes are normal mutable Git refs. Anyone with push access to the notes ref
+can change timestamp metadata.
 
-## 11. Safety Model
-
-KMT does not blindly overwrite every timestamp it encounters. Its scan/complete/synchronize workflow distinguishes states such as:
-
-- completed
-- completable
-- synchronizable
-- conflict
-- unsynchronizable
-
-This is particularly important for existing repositories and for local files whose current mtime conflicts with repository metadata.
-
-## 12. Git Push and Pull
-
-KMT uses the dedicated notes ref alongside normal Git history.
-
-For the default `origin` remote, the wrapper integrates the KMT notes ref into push/pull processing:
-
-```text
-push
- ├── normal Git push
- └── push refs/notes/kmt/mtime
-
-pull
- ├── normal Git fetch/integration
- └── fetch refs/notes/kmt/mtime
-```
-
-The notes ref therefore needs to be treated as part of the repository's KMT metadata when repositories are shared or migrated.
+KMT does not sign notes or verify remote authors. Use repository permissions,
+review, and normal Git security controls.

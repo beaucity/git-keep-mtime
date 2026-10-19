@@ -1,125 +1,146 @@
-# Git Keep MTime Storage
+# Storage
 
-## 1. Storage Principle
+This document describes the persistent and local storage used by KMT.
 
-Git Keep MTime stores filesystem modification times separately from Git's normal file-content tree.
+## Authoritative metadata
 
-The main persistent Git-side metadata is stored in the dedicated notes ref:
+KMT stores timestamp metadata in the Git notes ref:
 
 ```text
 refs/notes/kmt/mtime
 ```
 
-The design can therefore be summarized as:
+The notes ref is a normal Git ref whose commits contain a notes tree. The tree
+maps a commit object ID to that commit's timestamp note.
+
+The notes ref is independent of branch history. Branch commits and KMT notes are
+fetched and pushed separately, although KMT coordinates both operations through
+its Git wrapper.
+
+## Note entries
+
+Each note entry has the logical form:
 
 ```text
-Git object database
-├── normal commits / trees / blobs
-└── KMT notes
-      └── refs/notes/kmt/mtime
+<STX>path<ETX>mtime<ETX>btime
 ```
 
-## 2. Note Entry Format
-
-A KMT file entry has the logical form:
-
-```text
-<STX>filename<ETX>mtime
-```
-
-`<STX>` and `<ETX>` are control characters, not the literal strings `STX` and `ETX`.
-
-For example, conceptually:
-
-```text
-<STX>src/main.c<ETX>1785934828
-```
-
-The fields are:
+`STX` and `ETX` are control characters, not literal text.
 
 | Field | Meaning |
-|---|---|
-| `<STX>` | Start-of-entry marker. |
-| `filename` | Repository-relative file path. |
-| `<ETX>` | Field separator. |
-| `mtime` | Unix filesystem modification timestamp. |
+| --- | --- |
+| `path` | Repository-relative path |
+| `mtime` | Unix epoch seconds, `D` for deleted, or empty |
+| `btime` | Unix epoch seconds, or empty |
 
-## 3. Why the STX Prefix Exists
-
-The leading STX marker is deliberately part of the storage format.
-
-KMT frequently needs to find one exact file entry in a note. With the entry beginning at STX, an exact fixed-string lookup can be performed using:
-
-```sh
-grep -m 1 -F "$STX$filename$ETX"
-```
-
-This has two useful properties:
-
-1. It avoids treating a filename as a prefix of another filename.
-2. It allows KMT to stop after the first exact matching entry.
-
-For example, searching for `foo.txt` should not accidentally select:
+Examples:
 
 ```text
-foo.txt.bak
-myfoo.txt
-path/foo.txt
+<STX>src/main.c<ETX>1785934828<ETX>1785930000
+<STX>old/file.c<ETX>D<ETX>
+<STX>new/file.c<ETX><ETX>
 ```
 
-The STX + filename + ETX sequence provides an explicit record boundary for this lookup strategy.
+An entry with both time fields empty is a placeholder. A note whose entries all
+have empty time fields contains no usable timestamp metadata. KMT may replace
+such a placeholder when a real remote note becomes available.
 
-## 4. Mtime Representation
+The leading `STX` gives an explicit record boundary. KMT can locate an exact
+path with a fixed-string search instead of matching a filename prefix.
 
-KMT stores mtime as a Unix timestamp. The value represents the filesystem modification time that KMT wants to preserve.
+## One note per commit
 
-The timestamp is kept as metadata rather than encoded into the file content or Git tree.
+A commit note is the complete timestamp snapshot for the files changed by that
+commit. KMT treats it as atomic:
 
-## 5. Incremental and Full Metadata
+- it does not merge individual paths from two versions of the same commit note;
+- on a conflict it chooses the whole local note or the whole remote note;
+- the default policy is `local`;
+- `NOTE_CONFLICT_POLICY=remote` selects the remote note.
 
-KMT uses incremental metadata to avoid regenerating the complete repository mtime state for every commit.
+A note for a commit is not part of the commit object and does not change the
+commit ID.
 
-The internal processing model contains concepts corresponding to:
+## Empty and deleted entries
+
+- Empty `mtime`/`btime` means the value is unknown or not available.
+- `D` in the mtime field marks a deletion.
+- Empty entries still preserve path-level state and are not equivalent to a
+  missing note.
+
+Placeholder notes are intentionally ignored when KMT looks for real timestamp
+metadata.
+
+## Notes history
+
+The notes ref points to a commit history, not to a mutable directory. Each notes
+commit contains a complete tree snapshot for that point in time.
+
+KMT may create a merge commit on the notes ref when local and remote note
+histories have diverged. The resulting tree contains the selected note state,
+and both note histories remain parents of the merge commit.
+
+A linear remote notes update is handled as a fast-forward when the local tree
+does not need a conflicting choice.
+
+## Local cache
+
+KMT maintains rebuildable indexes under:
 
 ```text
-mtime delta
-    │
-    ▼
-commit-level changes
-    │
-    ▼
-merged/full state
-    │
-    ▼
-working-tree synchronization
+.git/kmt/
 ```
 
-A delta records the mtime information that needs to change. A full state can represent the effective mtime of the repository files at a particular point in history.
+They contain derived state such as:
 
-The precise internal temporary-file layout is an implementation detail of the current alpha implementation and is intentionally not treated as a public storage API.
+- per-commit delta/stage metadata
+- full timestamp indexes
+- temporary rebuild data
 
-## 6. Notes Namespace
+These files are caches. They are not portable user data and are not a second
+authoritative copy of the notes. Deleting `.git/kmt/` is safe; KMT can rebuild it
+from Git history and notes.
 
-The KMT notes namespace is:
+## Backup refs
+
+KMT may keep local recovery refs under:
 
 ```text
-refs/notes/kmt/mtime
+refs/kmt/backup/
 ```
 
-Keeping KMT under its own notes namespace prevents it from mixing with unrelated Git Notes applications.
+These refs are internal implementation state. They are not part of the shared
+metadata format and should not be pushed, deleted, or configured manually.
 
-## 7. Transport
+The pre-fetch backup exists so an intercepted Git fetch cannot make local-only
+notes unreachable before KMT merges them.
 
-Because the KMT metadata is stored in Git Notes, normal Git commits alone are not sufficient to reproduce the complete KMT state in another clone.
+## Fetch and push
 
-The notes ref must also be available:
+KMT's intercepted `fetch`, `pull`, and `push` operations synchronize the notes
+ref.
 
-```text
-refs/notes/kmt/mtime
-```
+Do not add the KMT notes ref to `remote.<name>.fetch` or
+`remote.<name>.push`. KMT rejects refspecs that cover
+`refs/notes/kmt/mtime`, including broad `refs/notes/*` and `refs/*` patterns.
 
-The KMT wrapper integrates this ref with push/pull for the default `origin` remote.
+Other notes namespaces are not managed by KMT and are not blocked.
 
-## 8. Compatibility Principle
+## Rebuilding indexes
 
-KMT does not require a custom Git object type or a modified Git repository format. The repository continues to contain ordinary Git commits, trees, and blobs, with KMT metadata represented through standard Git Notes.
+The notes ref is authoritative. The local cache is rebuilt when needed.
+
+If the notes tree for a commit is missing, KMT cannot invent historical
+timestamps from commit content. It can only:
+
+- use existing note data;
+- use a known-good note ref or remote note;
+- complete metadata from the local filesystem if the user explicitly requests
+  it.
+
+## Trust model
+
+KMT does not sign notes or verify remote authors. Anyone who can push the notes
+ref can change timestamp metadata, subject to normal Git permissions and review.
+Treat KMT notes with the same trust you give any other mutable branch or ref in
+the repository.

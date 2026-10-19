@@ -1,87 +1,59 @@
 # Git Keep MTime
 
-**Git Keep MTime** preserves filesystem modification times (`mtime`) when working with Git.
+![Version](https://img.shields.io/badge/version-0.4.6-blue)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
 
-Git tracks file content and history, but filesystem `mtime` is not part of a Git tree. As a result, operations such as switching branches or checking out another commit can change the contents of files without restoring the modification times that those files had at the target revision.
+**Git Keep MTime (`git-kmt`)** is a client-side Git wrapper that preserves
+filesystem timestamps when Git changes the working tree.
 
-Git Keep MTime records file modification times as Git Notes and synchronizes the working tree after relevant Git operations.
+Git restores file contents, but it does not normally restore the original
+filesystem **mtime**. KMT records timestamp metadata separately from the
+commit tree and applies it after operations such as `switch`, `checkout`,
+`merge`, `rebase`, `reset`, and `pull`.
 
-The most useful case is simple:
+On macOS it can also preserve filesystem **birth time (btime)** where the
+filesystem exposes it.
 
-```text
-branch A                         branch B
-  a.txt                           a.txt
-  mtime = T1                      mtime = T2
-       │                               │
-       └──── git switch ──────────────┘
-                       ↓
-                 working tree
-                 mtime follows
-                 the target commit
-```
+## Why
 
-After `git switch` or `git checkout`, files can regain the modification times associated with the target commit instead of receiving only the filesystem timestamps produced by Git's checkout operation.
+A checkout should restore more than the bytes of a file. Build tools, backup
+tools, and humans often use modification time as meaningful state.
 
-> **Status:** v0.1.3-alpha. This is an early release and should be considered experimental.
-
-## Why Git Keep MTime?
-
-Filesystem modification time is useful to many tools and workflows. A Git checkout normally restores file contents, but it does not preserve the original filesystem `mtime` from the historical working tree.
-
-For projects where `mtime` carries useful information, this can be inconvenient. Git Keep MTime adds that information without changing Git's normal object format:
-
-- Git continues to store files and history normally.
-- KMT stores mtime metadata separately in Git Notes.
-- KMT synchronizes the working tree mtime when the relevant Git state changes.
-
-## Key Features
-
-- Preserve file `mtime` across Git branch switches and checkouts.
-- Synchronize mtime after relevant Git operations such as `switch`, `checkout`, `reset`, `revert`, `merge`, `pull`, and `restore`.
-- Track mtime changes incrementally rather than rebuilding all metadata for every commit.
-- Store KMT metadata in a dedicated Git Notes namespace.
-- Support completing missing historical mtime metadata from a working tree that still has the original timestamps.
-- Detect mtime conflicts and unsafe synchronization cases instead of silently overwriting them.
-- Implemented as a POSIX shell program.
-
-## How It Works
-
-KMT uses the Git Notes namespace:
+KMT keeps that state in Git notes:
 
 ```text
 refs/notes/kmt/mtime
 ```
 
-Each relevant Git commit has an associated KMT note containing the file mtime information needed to reconstruct the working-tree state.
+It does not rewrite tracked files and does not add timestamp fields to normal
+commit trees.
 
-KMT also maintains internal note files while calculating and processing metadata. These are implementation details; users normally interact with KMT through `git` commands after installation.
+## Features
 
-### Note entry format
+- Preserves file mtime across Git working-tree changes.
+- Preserves btime on macOS where the filesystem supports it.
+- Works from the repository root and from subdirectories.
+- Stores authoritative metadata in Git notes.
+- Uses rebuildable local indexes under `.git/kmt/`.
+- Handles history rewriting with `rebase` and `pull --rebase`.
+- Synchronizes notes through intercepted `fetch`, `pull`, and `push`.
+- Supports explicit completion and synchronization for existing repositories.
+- Keeps notes atomic per commit; conflicting notes are selected as a whole,
+  never merged field-by-field.
+- Rejects manual notes refspecs that could bypass KMT's merge logic.
 
-A file entry is represented conceptually as:
+## Requirements
 
-```text
-<STX>filename<ETX>mtime
-```
+- Git
+- A POSIX-compatible shell
+- macOS or Linux
+- Standard Unix utilities used by Git and the installer
+- macOS: `setfile` for btime support (provided by the Xcode command-line tools)
+- Optional: Python 3 for the faster scan backend
 
-where:
-
-- `<STX>` marks the beginning of an entry.
-- `filename` is the repository-relative path.
-- `<ETX>` separates the filename from the Unix timestamp.
-- `mtime` is the filesystem modification time represented as a Unix timestamp.
-
-The leading `<STX>` is intentional. It allows KMT to locate an exact file entry efficiently with a fixed-string search such as:
-
-```sh
-grep -m 1 -F "<STX>filename<ETX>"
-```
-
-This avoids ambiguous prefix matches and is important for fast metadata lookup.
+Linux currently supports mtime; btime remains platform-dependent.
 
 ## Installation
-
-The GitHub release uses `shell/git_kmt.sh` as the public KMT program.
 
 From the repository root:
 
@@ -90,196 +62,208 @@ chmod +x shell/git_kmt.sh
 ./shell/git_kmt.sh kmt-install
 ```
 
-Installation places the KMT wrapper into the command path and keeps the original Git executable available behind the wrapper.
-
-### Development / link installation
-
-The installer also supports its link mode:
+For development, link mode is also available:
 
 ```sh
 ./shell/git_kmt.sh kmt-install --link
 ```
 
-This is useful when developing KMT from a working source tree because the installed KMT entry can point back to the source script.
-
-## Quick Start
-
-### 1. Install KMT
+Verify the installation:
 
 ```sh
-chmod +x shell/git_kmt.sh
-./shell/git_kmt.sh kmt-install
+git kmt-version
 ```
 
-### 2. Work with Git normally
-
-After installation, use normal Git commands:
-
-```sh
-git add .
-git commit -m "Update files"
-git switch another-branch
-git checkout <commit-or-branch>
-```
-
-KMT intercepts the Git operations it needs to handle and performs the corresponding mtime processing automatically.
-
-### 3. Complete existing history when needed
-
-For a repository that already contains history, KMT metadata may not exist for all historical files. If the working tree still contains useful/original mtimes, inspect the repository first:
-
-```sh
-git kmt-scan
-```
-
-Then complete missing metadata:
-
-```sh
-git kmt-complete
-```
-
-After metadata has been completed, it can be synchronized from the repository:
-
-```sh
-git kmt-synchronize
-```
-
-## KMT Commands
-
-The main user-facing commands in this release are:
-
-| Command | Purpose |
-|---|---|
-| `git kmt-scan` | Scan files and report KMT/mtime status. |
-| `git kmt-complete` | Complete missing KMT metadata using current local file mtimes. |
-| `git kmt-synchronize` | Synchronize local file mtimes from repository metadata. |
-| `git kmt-resolve` | Resolve mtime conflicts by using local file mtimes. |
-| `git kmt-version` | Show the installed KMT version. |
-| `./shell/git_kmt.sh kmt-install` | Install KMT. |
-| `./shell/git_kmt.sh kmt-upgrade` | Upgrade KMT. |
-| `git kmt-uninstall` | Uninstall KMT. |
-
-`kmt-note` is intentionally not documented as a public command in this release. Its inspection functionality is still being developed and will be documented when it becomes sufficiently stable.
-
-## Git Operations
-
-KMT integrates with Git operations that can change the working tree or commit history, including:
-
-- `add`
-- `rm`
-- `rename`
-- `commit`
-- `merge`
-- `restore`
-- `revert`
-- `reset`
-- `rebase`
-- `switch`
-- `checkout`
-- `pull`
-- `push`
-
-The most important user-visible behavior is synchronization after a change of the checked-out Git state. For example:
-
-```sh
-git switch feature-a
-```
-
-or:
-
-```sh
-git checkout <commit>
-```
-
-KMT detects the resulting HEAD change and synchronizes the affected files using the mtime metadata associated with the target history.
-
-## Git Notes and Remotes
-
-KMT uses a dedicated notes ref:
-
-```text
-refs/notes/kmt/mtime
-```
-
-The KMT wrapper also integrates this notes ref with normal `git push` and `git pull` operations for the default `origin` remote, so mtime metadata can travel with the repository's Git history.
-
-When moving an existing repository or manually working with remotes, make sure the KMT notes ref is available on the target repository as well as the normal Git commits.
-
-## Existing Repositories
-
-Installing KMT does **not** automatically create complete mtime metadata for every historical file.
-
-For an existing repository, the important distinction is:
-
-```text
-install KMT
-     ↓
-existing working tree
-     ↓
-scan metadata status
-     ↓
-complete missing metadata when possible
-     ↓
-future Git operations maintain KMT metadata
-```
-
-`kmt-complete` uses the current filesystem mtime as the source for missing metadata. Therefore, it should be run only when the current working-tree timestamps are still the timestamps you want to preserve.
-
-KMT also checks for conditions that make completion or synchronization unsafe. Files with unresolved mtime conflicts should be handled explicitly rather than silently overwritten.
-
-## Installation, Upgrade, and Uninstall Rules
-
-There is an intentional distinction between the installation script and the installed Git command.
-
-### Install
-
-Run through the source script:
-
-```sh
-./shell/git_kmt.sh kmt-install
-```
-
-### Upgrade
-
-Run through the source script:
+Upgrade an installed copy:
 
 ```sh
 ./shell/git_kmt.sh kmt-upgrade
 ```
 
-### Uninstall
-
-Once installed, uninstall through Git:
+Uninstall through the installed Git wrapper:
 
 ```sh
 git kmt-uninstall
 ```
 
-Do not use `./shell/git_kmt.sh kmt-uninstall` as the normal uninstall command.
+The installer keeps the original Git executable behind the wrapper, so normal
+Git commands continue to work.
 
-## Limitations and Alpha Status
+## Quick start
 
-v0.1.3 is an alpha release. The following areas should be considered subject to further development and testing:
+```sh
+cd my-repository
 
-- Rename-following mtime history is not yet fully implemented.
-- Complex Git histories and less common combinations of Git operations require continued testing.
-- KMT metadata is separate from normal Git tree objects and therefore must be transferred through the KMT notes ref.
-- Existing repositories may require an explicit metadata completion step.
-- Platform-specific filesystem timestamp behavior can differ between operating systems.
-- `kmt-note` exists in the program but its user-facing inspection interface is not yet considered stable and is intentionally omitted from this README.
+git add file.txt
+git commit -m "Add file"
 
-## Architecture and Storage
+git switch another-branch
+git switch -
+```
 
-For implementation details, see:
+KMT records timestamp metadata when the commit is created and restores it when
+Git changes the working tree.
 
-- [Architecture](docs/Architecture.md)
+Inspect the current repository state:
+
+```sh
+git kmt-scan
+```
+
+Complete metadata for an existing repository:
+
+```sh
+git kmt-scan          # inspect first
+git kmt-complete      # record eligible local mtimes
+```
+
+Apply repository metadata to the working tree:
+
+```sh
+git kmt-synchronize
+```
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `git kmt` | Interactive KMT UI |
+| `git kmt-scan` | Report completed, completable, synchronizable, conflicting, and unsynchronizable files |
+| `git kmt-complete` | Record eligible local mtime/btime into KMT notes |
+| `git kmt-synchronize` | Apply repository timestamp metadata to the working tree |
+| `git kmt-resolve` | Resolve mtime conflicts using the local filesystem value |
+| `git kmt-diff` | List files whose filesystem timestamps differ from notes |
+| `git kmt-version` | Print the installed version |
+| `./shell/git_kmt.sh kmt-install` | Install the wrapper |
+| `./shell/git_kmt.sh kmt-upgrade` | Upgrade the wrapper |
+| `git kmt-uninstall` | Remove the installed wrapper |
+
+## Supported Git operations
+
+KMT intercepts timestamp-sensitive behavior for:
+
+```text
+add    rm      mv      commit   merge
+restore revert reset   rebase   switch
+checkout clone push    fetch   pull
+```
+
+Commands that do not need timestamp handling are forwarded to the original Git
+executable.
+
+## How it works
+
+For each relevant commit, KMT stores a note in:
+
+```text
+refs/notes/kmt/mtime
+```
+
+Each entry has the logical form:
+
+```text
+<STX>path<ETX>mtime<ETX>btime
+```
+
+- `path` is repository-relative.
+- `mtime` and `btime` are Unix epoch seconds.
+- An empty field means the value is unknown or intentionally blank.
+- `D` in the mtime field marks a deleted path.
+- A note whose entries all have empty time fields is a placeholder, not real
+  metadata.
+
+A commit note is atomic: on a conflict, KMT chooses the whole local note or the
+whole remote note according to `NOTE_CONFLICT_POLICY` (default: `local`).
+
+Local indexes under:
+
+```text
+.git/kmt/
+```
+
+are caches. They can be deleted and rebuilt from Git history and KMT notes.
+
+## Sharing timestamp metadata
+
+KMT's intercepted `fetch`, `pull`, and `push` handle the notes ref
+automatically.
+
+Do **not** add `refs/notes/kmt/mtime` to `remote.<name>.fetch` or
+`remote.<name>.push`. Those refspecs are rejected so that Git cannot update or
+publish the KMT notes ref before KMT has merged it.
+
+If notes are shared by a team, all users who care about timestamps should use
+the KMT wrapper for the relevant Git operations.
+
+## Mixed KMT and plain Git usage
+
+Plain Git does not create KMT notes, and a plain `git pull` does not fetch the
+KMT notes ref.
+
+Consequences:
+
+- Commits created with plain Git have no timestamp metadata until a KMT user
+  completes them.
+- After a plain `git pull`, run KMT `git fetch` before `git kmt-synchronize` to
+  avoid applying stale notes.
+- KMT does not fabricate a placeholder note for a fast-forward upstream
+  commit. If a plain-Git author later publishes a real note, KMT can import it.
+- KMT may warn when a commit has no note; this is expected in mixed workflows.
+
+For reliable timestamp preservation, use KMT for `add`, `commit`, `fetch`,
+`pull`, and `push`.
+
+## Existing repositories
+
+Installing KMT does not automatically reconstruct historical timestamps.
+
+Typical migration:
+
+```sh
+git kmt-scan
+# verify that local file times are the ones you want to preserve
+git kmt-complete
+```
+
+If metadata already exists, use `git kmt-synchronize` instead of completion.
+
+## Limitations
+
+- btime support depends on the platform and filesystem; Linux currently does not
+  provide btime restoration.
+- KMT does not preserve access time (`atime`).
+- Directory timestamp restoration is conservative when uncommitted files or
+  structural changes make the expected state ambiguous.
+- File names are stored in a line-oriented metadata format; unusual path
+  encodings may be unsupported.
+- Some advanced history-rewrite cases may require additional testing.
+- Timestamp metadata is only as good as the notes that were completed and
+  shared. Plain Git users do not produce metadata automatically.
+- KMT is a client-side wrapper; it cannot control users who invoke the real Git
+  binary directly.
+
+## Documentation
+
 - [Usage](docs/Usage.md)
-- [Storage](docs/Storage.md)
+- [Storage format](docs/Storage.md)
+- [Architecture](docs/Architecture.md)
+- [Release notes](RELEASE_NOTES.md)
+
+## Development
+
+Rebuild the distributed shell entry point after editing `src/`:
+
+```sh
+./tools/build.sh src/git.sh shell/git_kmt.sh
+```
+
+Run the test suites:
+
+```sh
+tests/run_tests.sh
+```
 
 ## License
 
-License information should be added here when the project license is finalized.
-
-## Version
-
-**Git Keep MTime v0.1.3-alpha**
+This repository does not currently include a `LICENSE` file. Choose and add a
+license before publishing a release.

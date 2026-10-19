@@ -4524,7 +4524,7 @@ checkout_mtime_from_source()
         note_mts="$MTIME_RESULT"
         note_bts="$BTIME_RESULT"
         if [ "$first_commit" != "$last_commit" ] ; then
-            [ -n "$note_bts" ] && print_n "last commit should not has bts: $note_bts, fn: $rpath" && return 1
+            [ -n "$note_bts" ] && print_n "W: last commit should not has bts: $note_bts, fn: $rpath"
             if git_note_time "$rpath" "$first_commit"; then
                 note_bts="$BTIME_RESULT"
             fi
@@ -5082,7 +5082,7 @@ EOF
         else
             ! file_mts=$(get_file_mtime "$path") && return 1
 
-            [ "$file_mts" -lt "$cmd_ts" ] && echo "file not changed: $file_mts < $cmd_ts" && continue
+            [ "$file_mts" -lt "$cmd_ts" ] && log "file not changed: $file_mts < $cmd_ts" && continue
 
             ! restore_file_from_source "$SUB_DIR$ipath" "$source" "$file_mts" "" && echo "restore failed: $SUB_DIR, $path" && return 1
         fi
