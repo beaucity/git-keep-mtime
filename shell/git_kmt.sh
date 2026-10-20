@@ -17,7 +17,7 @@
 #      are not handled by KMT to that executable.
 #
 #  Version:
-#      0.4.6
+#      0.4.6-alpha.1
 #
 #  Storage model:
 #      git notes --ref=kmt/mtime <commit>
@@ -30,7 +30,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.4.6'
+KMT_VERSION='0.4.6-alpha.1'
 
 META_NAME="time-notes"
 
@@ -83,14 +83,14 @@ log()
 
     [ -z "$KMT_DEBUG_LOG_FILE" ] && return 0
 
-    [ "$logging" = "1" ] && return $log_ret
+    [ "$logging" = "1" ] && return 0
 
     logging=1
 
-    if [ -n "$last_log_ts" ]; then
-        tsd=$(float_diff "$(date +%s.%N)" "$last_log_ts")
-    else
+    if [ -z "$last_log_ts" ]; then
         tsd=$(format_timestamp "$(date +%s)")
+    else
+        tsd=$(float_diff "$(date +%s.%N)" "$last_log_ts")
     fi
 
     case "$KMT_DEBUG_LOG_FILE" in
@@ -109,7 +109,6 @@ log()
 
     logging=0
 
-#    return $log_ret
     return 0
 }
 
@@ -1451,6 +1450,10 @@ detect_kmt_conf()
         grep -o "^${_key}\s*.*" "$_file" | sed "s/${_key} *//"
     }
 
+    if [ ! -f "$app_kmt_conf" ] && [ -f "/etc/$APP_KMT.conf" ]; then
+        app_kmt_conf="/etc/$APP_KMT.conf"
+    fi
+
     if [ -f "$app_kmt_conf" ]; then
         [ -z "$KMT_DEBUG_LOG_FILE" ] && KMT_DEBUG_LOG_FILE=$(find_in_conf "kmt_debug_log" "$app_kmt_conf")
         ENABLE_OID_VERIFY=$(find_in_conf "enable_oid_verify" "$app_kmt_conf")
@@ -2721,7 +2724,10 @@ git_note_add()
 #   Print the whole note for a commit. Returns non-zero if no note.
 git_note_show()
 {
-    origin_git notes --ref="$NOTE_REF" show "$1" 2>/dev/null
+    _note_show=$(origin_git notes --ref="$NOTE_REF" show "$1" 2>/dev/null) || return 1
+    [ -n "$_note_show" ] || return 1
+
+    printf '%s\n' "$_note_show"
 }
 
 git_note_oid()
@@ -3674,9 +3680,68 @@ verify_or_amend_commit_note()
 # git_command_handler.
 #
 
+git_remote_exists()
+{
+    _remote_candidate="$1"
+    [ -n "$_remote_candidate" ] || return 1
+
+    origin_git remote 2>/dev/null | grep -Fxq "$_remote_candidate" && return 0
+
+    case "$_remote_candidate" in
+        *://*|/*|./*|../*) return 0 ;;
+    esac
+
+    return 1
+}
+
+# Find an explicit repository argument after fetch/pull/push.  The command
+# token is skipped so that a leading `-C <path>` is not mistaken for a remote.
+# Configured remote names are preferred over URL/path arguments.
+select_git_remote_arg()
+{
+    _remote_cmd="$1"
+    shift
+
+    _after_cmd=0
+    for _remote_arg in "$@"; do
+        if [ "$_after_cmd" = "0" ]; then
+            [ "$_remote_arg" = "$_remote_cmd" ] && _after_cmd=1
+            continue
+        fi
+
+        case "$_remote_arg" in
+            -*) continue ;;
+        esac
+
+        if origin_git remote 2>/dev/null | grep -Fxq "$_remote_arg"; then
+            print_n "$_remote_arg"
+            return 0
+        fi
+    done
+
+    _after_cmd=0
+    for _remote_arg in "$@"; do
+        if [ "$_after_cmd" = "0" ]; then
+            [ "$_remote_arg" = "$_remote_cmd" ] && _after_cmd=1
+            continue
+        fi
+
+        case "$_remote_arg" in
+            -*|'') continue ;;
+        esac
+
+        if git_remote_exists "$_remote_arg"; then
+            print_n "$_remote_arg"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 check_note_refs_safety()
 {
-    remote_name="${REMOTE_NAME:-origin}"
+    remote_name="${1:-${REMOTE_NAME:-origin}}"
 
     for _action in "fetch" "push"; do
         config_refspecs=$(origin_git config --get-all \
@@ -3758,21 +3823,6 @@ check_note_refspec_args()
               ;;
         esac
     done
-
-    return 0
-}
-
-post_push ()
-{
-    origin_git push \
-                "$REMOTE_NAME" \
-                "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" && return 0
-
-    log "push $REMOTE_NAME failed, maybe notes push rejected, fetch and merge then retry"
-    post_fetch || return 1
-
-    origin_git push "$REMOTE_NAME" \
-        "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" || return 1
 
     return 0
 }
@@ -3866,7 +3916,9 @@ post_fetch_prepare()
 
 post_fetch_fetch_remote()
 {
-    if ! origin_git fetch "$REMOTE_NAME" "+refs/notes/$NOTE_REF:$fetch_ref"; then
+    remote_name="${1:-$REMOTE_NAME}"
+
+    if ! origin_git fetch "$remote_name" "+refs/notes/$NOTE_REF:$fetch_ref"; then
         return 1
     fi
 
@@ -3906,7 +3958,6 @@ post_fetch_try_linear()
 {
     fetch_remote_tip=$(git_rev_parse "$fetch_ref") || fetch_remote_tip=
     fetch_local_tip="$old_note_id"
-
     [ -n "$fetch_remote_tip" ] || return 1
     [ "$fetch_local_tip" = "$fetch_remote_tip" ] && return 1
 
@@ -4111,9 +4162,11 @@ post_fetch_link_remote_tip()
 
 post_fetch()
 {
+    fetch_remote_name="${3:-$REMOTE_NAME}"
+
     post_fetch_prepare "$1" "$2" || return 1
 
-    if ! post_fetch_fetch_remote; then
+    if ! post_fetch_fetch_remote "$fetch_remote_name"; then
         post_fetch_cleanup
         return 1
     fi
@@ -4151,12 +4204,38 @@ post_fetch()
     return 0
 }
 
+post_clone()
+{
+    #The urls are not always endswith suffix ".git", such as "git clone -b master https://github/abc/efg"
+    ! upstream_url=$(grep_arg '(:|/)[^/]+$' "$@") && echo "unknown url" && return 0
+
+    log "url: $upstream_url"
+
+    repo_dir=$(select_arg "$upstream_url" "$@")
+    if [ -z "$repo_dir" ] ; then
+        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]+$' | cut -c 2-)
+        repo_dir=${repo_dir%.*}
+    fi
+    echo "cd cloned-dir: $repo_dir, remote: $REMOTE_NAME"
+
+    cd "$repo_dir" && init_path || return 1
+
+    if ! post_fetch; then
+        echo "post_fetch failed"
+        return 1
+    fi
+
+    ! on_head_moved && echo "post_head_moved failed" && return 1
+
+    return 0
+}
+
 post_pull()
 {
     old_commit_id="$1"
     old_note_id="$2"
 
-    if ! post_fetch "$old_commit_id" "$old_note_id"; then
+    if ! post_fetch "$old_commit_id" "$old_note_id" "$3"; then
         return 1
     fi
 
@@ -4227,29 +4306,44 @@ post_pull()
     return 0
 }
 
-post_clone()
+get_push_urls()
 {
-    #The urls are not always endswith suffix ".git", such as "git clone -b master https://github/abc/efg"
-    ! upstream_url=$(grep_arg '(:|/)[^/]+$' "$@") && echo "unknown url" && return 0
+    remote_name="$1"
 
-    log "url: $upstream_url"
+    origin_git remote get-url --push --all "$remote_name" 2>/dev/null ||
+        printf '%s\n' "$remote_name"
+}
 
-    repo_dir=$(select_arg "$upstream_url" "$@")
-    if [ -z "$repo_dir" ] ; then
-        repo_dir=$(print_n "$upstream_url" | grep -Eo '(:|/)[^/]+$' | cut -c 2-)
-        repo_dir=${repo_dir%.*}
-    fi
-    echo "cd cloned-dir: $repo_dir, remote: $REMOTE_NAME"
+post_push ()
+{
+    push_remote="${1:-$REMOTE_NAME}"
+    push_urls=$(get_push_urls "$push_remote")
 
-    cd "$repo_dir" && init_path || return 1
+    # Fetch/merge notes from every push URL first so that a later URL's
+    # notes are included when publishing to all URLs.
+    while IFS= read -r url; do
+        [ -n "$url" ] || continue
 
-    if ! post_fetch; then
-        echo "post_fetch failed"
-        return 1
-    fi
+        if origin_git ls-remote --exit-code "$url" \
+                "refs/notes/$NOTE_REF" >/dev/null 2>&1; then
+            post_fetch "" "" "$url" || return 1
+        fi
+    done <<EOF
+$push_urls
+EOF
 
-    ! on_head_moved && echo "post_head_moved failed" && return 1
+    while IFS= read -r url; do
+        [ -n "$url" ] || continue
 
+        origin_git push "$url" \
+            "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" && continue
+
+        post_fetch "" "" "$url" || return 1
+        origin_git push "$url" \
+            "refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" || return 1
+    done <<EOF
+$push_urls
+EOF
     return 0
 }
 
@@ -5117,8 +5211,15 @@ git_command_handler()
             pre_revert "$@" || return 1
             ;;
         fetch|pull|push)
+            explicit_remote=
+            case "$cmd" in
+                fetch|pull|push)
+                    explicit_remote=$(select_git_remote_arg "$cmd" "$@") || explicit_remote=
+                    ;;
+            esac
+
             check_note_refspec_args "$@" || return 1
-            check_note_refs_safety || return 1
+            check_note_refs_safety "$explicit_remote" || return 1
 
             old_note_id="$(git_rev_parse "refs/notes/$NOTE_REF")"
 
@@ -5326,20 +5427,10 @@ git_command_handler()
             fi
             log "post $cmd ok"
             ;;
-        push)
-            log "post $cmd ..."
-            if ! select_arg "--dry-run" "$@"; then
-                if ! post_push "$@"; then
-                    ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
-                    echo "Git push succeeded but timestamp note push failed." && return 1
-                fi
-            fi
-            log "post $cmd ok"
-            ;;
         fetch)
             log "post $cmd ..."
             if ! select_arg "--dry-run" "$@"; then
-                if ! post_fetch "$old_commit_id" "$old_note_id"; then
+                if ! post_fetch "$old_commit_id" "$old_note_id" "$explicit_remote"; then
                     ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
                     echo "Git pull succeeded but timestamp note fetch failed." && return 1
                 fi
@@ -5349,11 +5440,21 @@ git_command_handler()
             ;;
         pull)
             log "post $cmd ..."
-            if ! post_pull "$old_commit_id" "$old_note_id"; then
+            if ! post_pull "$old_commit_id" "$old_note_id" "$explicit_remote"; then
                 ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
                 echo "Git pull succeeded but timestamp note pull failed." && return 1
             fi
             post_fetch_notes_backup_cleanup
+            log "post $cmd ok"
+            ;;
+        push)
+            log "post $cmd ..."
+            if ! select_arg "--dry-run" "$@"; then
+                if ! post_push "$explicit_remote"; then
+                    ! origin_git ls-remote --exit-code "${explicit_remote:-$REMOTE_NAME}" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                    echo "Git push succeeded but timestamp note push failed." && return 1
+                fi
+            fi
             log "post $cmd ok"
             ;;
     esac
