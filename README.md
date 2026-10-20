@@ -1,6 +1,6 @@
 # Git Keep MTime
 
-![Version](https://img.shields.io/badge/version-0.4.6-blue)
+![Version](https://img.shields.io/badge/version-0.4.6-alpha.1-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
 
 **Git Keep MTime (`git-kmt`)** is a client-side Git wrapper that preserves
@@ -249,21 +249,6 @@ If metadata already exists, use `git kmt-synchronize` instead of completion.
 - [Architecture](docs/Architecture.md)
 - [Release notes](RELEASE_NOTES.md)
 
-## Development
-
-Rebuild the distributed shell entry point after editing `src/`:
-
-```sh
-./tools/build.sh src/git.sh shell/git_kmt.sh
-```
-
-Run the test suites:
-
-```sh
-tests/run_tests.sh
-```
-
 ## License
 
-This repository does not currently include a `LICENSE` file. Choose and add a
-license before publishing a release.
+GNU General Public License v3.0. See [LICENSE.txt](LICENSE.txt).

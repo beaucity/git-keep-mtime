@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.4.6
+## v0.4.6-alpha.1
 
 Git Keep MTime is a client-side Git wrapper for preserving file mtime and,
 where supported, btime across working-tree changes.
@@ -87,8 +87,7 @@ git kmt-synchronize
   unsupported.
 - Mixed plain-Git workflows cannot guarantee timestamps for commits that never
   passed through KMT.
-- This repository does not currently include a `LICENSE` file. Add one before
-  distributing a release.
+- The project is licensed under GPL-3.0; see `LICENSE.txt`.
 
 See [README.md](README.md), [Usage](docs/Usage.md), [Storage](docs/Storage.md),
 and [Architecture](docs/Architecture.md) for details.

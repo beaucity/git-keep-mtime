@@ -4,7 +4,7 @@
 
 Git Keep MTime (`git_kmt`) is a Git extension that preserves filesystem modification times by storing mtime metadata in Git Notes and synchronizing the working tree after relevant Git operations.
 
-Current release target: **v0.4.6**.
+Current release target: **v0.4.6-alpha.1**.
 
 ## Public Repository Structure
 
