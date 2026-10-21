@@ -17,7 +17,7 @@
 #      are not handled by KMT to that executable.
 #
 #  Version:
-#      0.4.6-alpha.1
+#      v0.4.6-alpha.1
 #
 #  Storage model:
 #      git notes --ref=kmt/mtime <commit>
@@ -30,7 +30,7 @@
 APP='git'
 APP_KMT='git_kmt'
 KMT_FULL_NAME='Git Keep MTime'
-KMT_VERSION='0.4.6-alpha.1'
+KMT_VERSION='v0.4.6-alpha.1'
 
 META_NAME="time-notes"
 

@@ -1,6 +1,6 @@
 # Git Keep MTime
 
-![Version](https://img.shields.io/badge/version-0.4.6-alpha.1-blue)
+![Version](https://img.shields.io/badge/version-v0.4.6-alpha.1-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
 
 **Git Keep MTime (`git-kmt`)** is a client-side Git wrapper that preserves
