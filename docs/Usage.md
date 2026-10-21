@@ -198,6 +198,26 @@ refs/notes/kmt/mtime
 ```
 
 KMT's intercepted `fetch`, `pull`, and `push` handle this ref automatically.
+Explicit remote and branch forms are supported:
+
+```sh
+git fetch upstream feature
+git pull upstream feature
+git push upstream feature
+```
+
+For a remote with multiple push URLs, KMT merges notes from each URL before
+pushing the shared notes ref to all of them. This prevents a stale notes ref on
+one URL from rejecting a push after another URL has already advanced.
+
+If you need to refresh local notes manually after a mixed workflow:
+
+```sh
+git fetch nas
+```
+
+The notes ref is global, not per-branch. It may contain notes for commits that
+are not present on every remote that receives the ref.
 
 Do **not** configure it in the remote refspecs:
 

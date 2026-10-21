@@ -37,6 +37,8 @@ commit trees.
 - Uses rebuildable local indexes under `.git/kmt/`.
 - Handles history rewriting with `rebase` and `pull --rebase`.
 - Synchronizes notes through intercepted `fetch`, `pull`, and `push`.
+- Handles explicit `<remote> <branch>` arguments and remotes with multiple push
+  URLs.
 - Supports explicit completion and synchronization for existing repositories.
 - Keeps notes atomic per commit; conflicting notes are selected as a whole,
   never merged field-by-field.
@@ -186,7 +188,20 @@ are caches. They can be deleted and rebuilt from Git history and KMT notes.
 ## Sharing timestamp metadata
 
 KMT's intercepted `fetch`, `pull`, and `push` handle the notes ref
-automatically.
+automatically, including explicit remote and branch forms:
+
+```sh
+git fetch upstream feature
+git pull upstream feature
+git push upstream feature
+```
+
+If a remote has multiple push URLs, KMT fetches and merges the notes from each
+URL before publishing the shared notes ref. This keeps the notes in sync when,
+for example, one URL points to GitHub and another to a local NAS.
+
+The notes ref is global, not per-branch. When it is published to a remote, it
+may contain notes for commits that are not on that remote's branches.
 
 Do **not** add `refs/notes/kmt/mtime` to `remote.<name>.fetch` or
 `remote.<name>.push`. Those refspecs are rejected so that Git cannot update or

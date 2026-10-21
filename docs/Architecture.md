@@ -92,6 +92,13 @@ Branch refs and notes refs are independent in Git. KMT coordinates them:
 - `fetch`/`pull` fetch branch data and the notes ref;
 - `push` publishes the local notes ref after the branch push.
 
+Explicit remote and branch arguments are resolved and passed to the relevant
+handler instead of changing the current branch's remote name.
+
+When a remote has multiple push URLs, KMT first fetches/merges notes from each
+URL, then publishes the merged notes ref to each URL. The notes ref is global,
+not per-branch.
+
 KMT may create a notes merge commit when local and remote notes have diverged.
 The merge commit keeps both histories while selecting the configured whole-note
 state.

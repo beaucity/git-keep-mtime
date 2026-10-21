@@ -79,7 +79,7 @@ logging=
 
 log()
 {
-    log_ret=$?
+#    log_ret=$?
 
     [ -z "$KMT_DEBUG_LOG_FILE" ] && return 0
 
@@ -87,10 +87,12 @@ log()
 
     logging=1
 
+    current_ts=$(date +%s.%N)
     if [ -z "$last_log_ts" ]; then
-        tsd=$(format_timestamp "$(date +%s)")
+        tsd=$(format_timestamp "${current_ts%%.*}")
     else
-        tsd=$(float_diff "$(date +%s.%N)" "$last_log_ts")
+        fast_float_diff "$current_ts" "$last_log_ts"
+        tsd="$FLOAT_DIFF_RESULT"
     fi
 
     case "$KMT_DEBUG_LOG_FILE" in
@@ -105,7 +107,7 @@ log()
             ;;
     esac
 
-    last_log_ts=$(date +%s.%N)
+    last_log_ts="$current_ts"
 
     logging=0
 
@@ -150,27 +152,91 @@ make_temp_dir()
     mktemp -d "${TMPDIR:-/tmp/}$1.XXXXXX"
 }
 
-float_diff() {
+fast_float_diff() {
     a="$1" b="$2"
 
+    # ---- Parse a ----
     case "$a" in
-        *.*) ia="${a%%.*}"; fa=$(printf "%s" "${a#*.}000000" | cut -c 1-6 | sed 's/^0*//') ;;
-        *) ia=$a; fa="0" ;;
+        *.*) ia="${a%%.*}"; fa="${a#*.}" ;;
+        *)   ia=$a; fa="" ;;
     esac
+    case "${#fa}" in
+        0) fa=0 ;;
+        1) fa="${fa}00000" ;;
+        2) fa="${fa}0000" ;;
+        3) fa="${fa}000" ;;
+        4) fa="${fa}00" ;;
+        5) fa="${fa}0" ;;
+        6) ;;
+        *) fa="${fa%"${fa#??????}"}" ;;
+    esac
+    fa="${fa#"${fa%%[!0]*}"}"
+    [ -z "$fa" ] && fa=0
 
+    # ---- Parse b ----
     case "$b" in
-        *.*) ib="${b%%.*}"; fb=$(printf "%s" "${b#*.}000000" | cut -c 1-6 | sed 's/^0*//') ;;
-        *) ib=$b; fb="0" ;;
+        *.*) ib="${b%%.*}"; fb="${b#*.}" ;;
+        *)   ib=$b; fb="" ;;
+    esac
+    case "${#fb}" in
+        0) fb=0 ;;
+        1) fb="${fb}00000" ;;
+        2) fb="${fb}0000" ;;
+        3) fb="${fb}000" ;;
+        4) fb="${fb}00" ;;
+        5) fb="${fb}0" ;;
+        6) ;;
+        *) fb="${fb%"${fb#??????}"}" ;;
+    esac
+    fb="${fb#"${fb%%[!0]*}"}"
+    [ -z "$fb" ] && fb=0
+
+    # ---- Sign ----
+    case "$ia" in
+        -*) sa=-1; ia="${ia#-}" ;;
+        *)  sa=1 ;;
+    esac
+    case "$ib" in
+        -*) sb=-1; ib="${ib#-}" ;;
+        *)  sb=1 ;;
     esac
 
-    [ "$(echo "$ia" | cut -c 1-1)" = "-" ] && sa='-1' && ia=$(echo "$ia" | cut -c 2-) || sa='1'
-    [ "$(echo "$ib" | cut -c 1-1)" = "-" ] && sb='-1' && ib=$(echo "$ib" | cut -c 2-) || sb='1'
+    [ -z "$ia" ] && ia=0
+    [ -z "$ib" ] && ib=0
 
-#    log "$a, $b, $ia, $fa, $ib, $fb"
-    ! diff=$(( (sa)*(ia * 1000000 + fa) - (sb)*(ib * 1000000 + fb) )) && echo "exp failed: $a $b $ia $fa $ib $fb" && return 1
-    sign=""; [ "$diff" -lt 0 ] && sign="-" && diff=$(( -diff ))
-    printf "%s%d.%06d" "$sign" $((diff / 1000000)) $((diff % 1000000))
+    # ---- Compute ----
+    if ! diff=$(( sa * (ia * 1000000 + fa) - sb * (ib * 1000000 + fb) )); then
+        FLOAT_DIFF_RESULT="exp failed: $a $b $ia $fa $ib $fb"
+        return 1
+    fi
+
+    sign=""
+    if [ "$diff" -lt 0 ]; then
+        sign="-"
+        diff=$(( -diff ))
+    fi
+
+    # Build result via arithmetic + string concat (no printf, no fork)
+    ip=$((diff / 1000000))
+    fp=$((diff % 1000000))
+    # Left-pad fractional part to 6 digits
+    case "${#fp}" in
+        1) fp="00000${fp}" ;;
+        2) fp="0000${fp}" ;;
+        3) fp="000${fp}" ;;
+        4) fp="00${fp}" ;;
+        5) fp="0${fp}" ;;
+    esac
+    FLOAT_DIFF_RESULT="${sign}${ip}.${fp}"
     return 0
+}
+
+float_diff() {
+    fast_float_diff "$@"
+    ret=$?
+
+    print_n "$FLOAT_DIFF_RESULT"
+    return $ret
 }
 
 REPLACE_RESULT=
@@ -1439,9 +1505,10 @@ detect_kmt_conf()
 
     app_kmt_path="$(realpath "$app_kmt_path")"
 
-    [ -L "$app_kmt_path" ] && app_kmt_path="$(readlink "$app_kmt_path")"
-
     app_kmt_conf="$(dirname "$app_kmt_path")/$APP_KMT.conf"
+    if ! [ -f "$app_kmt_conf" ] && [ -L "$app_kmt_path" ]; then
+        app_kmt_conf="$(dirname "$(readlink "$app_kmt_path")")/$APP_KMT.conf"
+    fi
 
     find_in_conf()
     {
@@ -3367,7 +3434,7 @@ update_note_time_table()
                             echo "file time note missing, type: $type, file: '$sfile', note-file: $cache_file" >&2
 #                            return 1
                         elif [ -d "${sfile#*"$STX"}" ]; then
-                            echo "dir time note missing, type: $type, file: '$sfile', note-file: $cache_file" >&2
+                            log "dir time note missing, type: $type, file: '$sfile', note-file: $cache_file"
                         fi
                     else
                         if [ "$type" = 1 ]; then
@@ -4326,7 +4393,10 @@ post_push ()
 
         if origin_git ls-remote --exit-code "$url" \
                 "refs/notes/$NOTE_REF" >/dev/null 2>&1; then
-            post_fetch "" "" "$url" || return 1
+            post_fetch "" "" "$url" || {
+                echo "fetch notes failed: $url"
+                return 1
+            }
         fi
     done <<EOF
 $push_urls
@@ -4390,9 +4460,12 @@ EOF2
 
 origin_git()
 {
-    log_ret=0
-    "$ORIGIN_APP" "$@" || log "ret: $?, params: '$*'"
-    return "$log_ret"
+    "$ORIGIN_APP" "$@" || {
+        ret="$?"
+        log "ret: $ret, params: '$*'"
+        return "$ret"
+    }
+    return 0
 }
 
 git_repo_root()
@@ -5422,8 +5495,12 @@ git_command_handler()
             REMOTE_NAME=$(git_branch_remote_name "$branch_name")
 
             if ! post_clone "$@"; then
-                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
-                return 1
+                if ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF"; then
+                    echo "ref: $NOTE_REF not exists"
+                else
+                    echo "Git clone succeeded but timestamp note pull failed."
+                    return 1
+                fi
             fi
             log "post $cmd ok"
             ;;
@@ -5431,7 +5508,7 @@ git_command_handler()
             log "post $cmd ..."
             if ! select_arg "--dry-run" "$@"; then
                 if ! post_fetch "$old_commit_id" "$old_note_id" "$explicit_remote"; then
-                    ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                    ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref: $NOTE_REF not exists" && return 0
                     echo "Git pull succeeded but timestamp note fetch failed." && return 1
                 fi
                 post_fetch_notes_backup_cleanup
@@ -5441,7 +5518,7 @@ git_command_handler()
         pull)
             log "post $cmd ..."
             if ! post_pull "$old_commit_id" "$old_note_id" "$explicit_remote"; then
-                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                ! origin_git ls-remote --exit-code "$REMOTE_NAME" "refs/notes/$NOTE_REF" && echo "ref: $NOTE_REF not exists" && return 0
                 echo "Git pull succeeded but timestamp note pull failed." && return 1
             fi
             post_fetch_notes_backup_cleanup
@@ -5451,7 +5528,7 @@ git_command_handler()
             log "post $cmd ..."
             if ! select_arg "--dry-run" "$@"; then
                 if ! post_push "$explicit_remote"; then
-                    ! origin_git ls-remote --exit-code "${explicit_remote:-$REMOTE_NAME}" "refs/notes/$NOTE_REF" && echo "ref:$NOTE_REF not exists" && return 0
+                    ! origin_git ls-remote --exit-code "${explicit_remote:-$REMOTE_NAME}" "refs/notes/$NOTE_REF" && echo "ref: $NOTE_REF not exists" && return 0
                     echo "Git push succeeded but timestamp note push failed." && return 1
                 fi
             fi
@@ -5470,14 +5547,16 @@ init_path()
 {
     #Use pwd -P to get the realpath, eg. /tmp
     CUR_DIR=$(pwd -P)
-    REPO_ROOT=$(git_repo_root)
+    if ! REPO_ROOT=$(git_repo_root); then
+        log "not in a git repo: $CUR_DIR"
+        return 0
+    fi
+
     GIT_DIR=$(git_repo_dir)
-    REMOTE_NAME=$(git_branch_remote_name "")
+    REMOTE_NAME=$(git_branch_remote_name "");
 
     [ "$REPO_ROOT" = "$CUR_DIR" ] && SUB_DIR= || SUB_DIR=${CUR_DIR#*"$REPO_ROOT/"}/
     find_command "look" > /dev/null && IS_LOOK_INSTALLED=1 || IS_LOOK_INSTALLED=0
-
-    check_note_refs_safety || return 1
 
     return 0
 }
@@ -5688,7 +5767,7 @@ app_command_handler()
 
             ;;
         *)
-            [ -z "$cmd" ] && log "no command: $*"
+#            [ -z "$cmd" ] && log "no command: $*"
             origin_git "$@"
             ;;
     esac

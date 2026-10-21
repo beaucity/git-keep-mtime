@@ -23,6 +23,9 @@ where supported, btime across working-tree changes.
   resolution, and a diff view.
 - Migrates notes across rebase and pull --rebase history rewriting.
 - Synchronizes notes through intercepted `fetch`, `pull`, and `push`.
+- Supports explicit remote and branch arguments for fetch, pull, and push.
+- Merges notes from every push URL before publishing when a remote has multiple
+  push URLs.
 - Uses whole-note conflict selection; it never merges fields from two versions
   of the same commit note.
 - Defaults to the local note on a genuine note conflict; the remote note can be

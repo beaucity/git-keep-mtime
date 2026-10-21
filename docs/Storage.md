@@ -118,7 +118,9 @@ notes unreachable before KMT merges them.
 ## Fetch and push
 
 KMT's intercepted `fetch`, `pull`, and `push` operations synchronize the notes
-ref.
+ref. If a remote has multiple push URLs, KMT merges notes from each URL before
+pushing the shared ref. Because the notes ref is global, it can contain notes
+for commits that are not present on every remote.
 
 Do not add the KMT notes ref to `remote.<name>.fetch` or
 `remote.<name>.push`. KMT rejects refspecs that cover
